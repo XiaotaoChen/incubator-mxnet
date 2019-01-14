@@ -28,6 +28,8 @@ from evaluate.eval_metric import MApMetric, VOC07MApMetric
 from config.config import cfg
 from symbol.symbol_factory import get_symbol_train
 
+import horovod.mxnet as hvd
+
 def convert_pretrained(name, args):
     """
     Special operations need to be made due to name inconsistance, etc
@@ -97,7 +99,7 @@ def train_net(net, train_path, num_classes, batch_size,
               use_difficult=False, class_names=None,
               voc07_metric=False, nms_topk=400, force_suppress=False,
               train_list="", val_path="", val_list="", iter_monitor=0,
-              monitor_pattern=".*", log_file=None):
+              monitor_pattern=".*", log_file=None, use_horovod=0, kv_store="local"):
     """
     Wrapper for training phase.
 
@@ -184,14 +186,36 @@ def train_net(net, train_path, num_classes, batch_size,
         mean_pixels = [mean_pixels, mean_pixels, mean_pixels]
     assert len(mean_pixels) == 3, "must provide all RGB mean values"
 
+    # set up environment
+    if use_horovod == 1:
+        print("--------------- using horovod to update parameters ---------------------")
+        # Initialize Horovod
+        hvd.init()
+        num_workers = hvd.size()
+        rank = hvd.rank()
+    else:
+        kv = mx.kvstore.create(kv_store)
+        num_workers = kv.num_workers
+        rank = kv.rank
+
+
+
     train_iter = DetRecordIter(train_path, batch_size, data_shape, mean_pixels=mean_pixels,
-        label_pad_width=label_pad_width, path_imglist=train_list, **cfg.train)
+        label_pad_width=label_pad_width, path_imglist=train_list, num_workers=num_workers, rank=rank, **cfg.train)
 
     if val_path:
         val_iter = DetRecordIter(val_path, batch_size, data_shape, mean_pixels=mean_pixels,
             label_pad_width=label_pad_width, path_imglist=val_list, **cfg.valid)
     else:
         val_iter = None
+
+    if num_workers > 1:
+        num_examples = 16551
+        epoch_size  = max(int(num_examples / batch_size / num_workers), 1)
+        logging.info('Resizing training data to %d batches per machine', epoch_size)
+        # resize train iter to ensure each machine has same number of batches per epoch
+        # if not, dist_sync can hang at the end with one machine waiting for other machines
+        train_iter = mx.io.ResizeIter(train_iter, epoch_size)
 
     # load symbol
     net = get_symbol_train(net, data_shape[1], num_classes=num_classes,
@@ -249,7 +273,8 @@ def train_net(net, train_path, num_classes, batch_size,
                       'wd':weight_decay,
                       'lr_scheduler':lr_scheduler,
                       'clip_gradient':None,
-                      'rescale_grad': 1.0 / len(ctx) if len(ctx) > 0 else 1.0 }
+                      'rescale_grad': 1.0 / batch_size / num_workers}
+                      # 'rescale_grad': 1.0 / len(ctx) if len(ctx) > 0 else 1.0 }
     monitor = mx.mon.Monitor(iter_monitor, pattern=monitor_pattern) if iter_monitor > 0 else None
 
     # run fit net, every n epochs we run evaluation network to get mAP
@@ -258,18 +283,48 @@ def train_net(net, train_path, num_classes, batch_size,
     else:
         valid_metric = MApMetric(ovp_thresh, use_difficult, class_names, pred_idx=3)
 
-    mod.fit(train_iter,
-            val_iter,
-            eval_metric=MultiBoxMetric(),
-            validation_metric=valid_metric,
-            batch_end_callback=batch_end_callback,
-            epoch_end_callback=epoch_end_callback,
-            optimizer='sgd',
-            optimizer_params=optimizer_params,
-            begin_epoch=begin_epoch,
-            num_epoch=end_epoch,
-            initializer=mx.init.Xavier(),
-            arg_params=args,
-            aux_params=auxs,
-            allow_missing=True,
-            monitor=monitor)
+    if use_horovod == 1:
+        opt = mx.optimizer.create("sgd", sym=net, **optimizer_params)
+        # opt = hvd.DistributedOptimizer(opt, rank)
+        opt = hvd.DistributedOptimizer(opt)
+        hvd.barrier()
+        if args is not None:
+            hvd.broadcast_parameters(args, root_rank=0)
+        if auxs is not None:
+            hvd.broadcast_parameters(auxs, root_rank=0)
+        mx.nd.waitall()
+
+        mod.fit(train_iter,
+                val_iter,
+                eval_metric=MultiBoxMetric(),
+                validation_metric=valid_metric,
+                batch_end_callback=batch_end_callback,
+                epoch_end_callback=epoch_end_callback,
+                optimizer=opt,
+                optimizer_params=optimizer_params,
+                begin_epoch=begin_epoch,
+                num_epoch=end_epoch,
+                initializer=mx.init.Xavier(),
+                arg_params=args,
+                aux_params=auxs,
+                allow_missing=True,
+                monitor=monitor,
+                kvstore=None)
+
+    else:
+        mod.fit(train_iter,
+                val_iter,
+                eval_metric=MultiBoxMetric(),
+                validation_metric=valid_metric,
+                batch_end_callback=batch_end_callback,
+                epoch_end_callback=epoch_end_callback,
+                optimizer='sgd',
+                optimizer_params=optimizer_params,
+                begin_epoch=begin_epoch,
+                num_epoch=end_epoch,
+                initializer=mx.init.Xavier(),
+                arg_params=args,
+                aux_params=auxs,
+                allow_missing=True,
+                monitor=monitor,
+                kvstore=kv)

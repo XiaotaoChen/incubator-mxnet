@@ -103,6 +103,8 @@ def parse_args():
                         help='use difficult ground-truths in evaluation')
     parser.add_argument('--no-voc07', dest='use_voc07_metric', action='store_false',
                         help='dont use PASCAL VOC 07 11-point metric')
+    parser.add_argument('--use_horovod', type=int, default=0)
+    parser.add_argument('--kv_store', help='the kv-store type', default='local', type=str)
     args = parser.parse_args()
     return args
 
@@ -126,8 +128,10 @@ def parse_class_names(args):
 if __name__ == '__main__':
     args = parse_args()
     # context list
-    ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
-    ctx = [mx.cpu()] if not ctx else ctx
+    if args.gpus != "None":
+        ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
+    else:
+        ctx = [mx.cpu()]
     # class names if applicable
     class_names = parse_class_names(args)
     # start training
@@ -150,4 +154,6 @@ if __name__ == '__main__':
               force_nms=args.force_nms,
               ovp_thresh=args.overlap_thresh,
               use_difficult=args.use_difficult,
-              voc07_metric=args.use_voc07_metric)
+              voc07_metric=args.use_voc07_metric,
+              use_horovod=args.use_horovod,
+              kv_store=args.kv_store)
