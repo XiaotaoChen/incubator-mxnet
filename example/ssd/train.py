@@ -105,6 +105,9 @@ def parse_args():
                         help='dont use PASCAL VOC 07 11-point metric')
     parser.add_argument('--use_horovod', type=int, default=0)
     parser.add_argument('--kv_store', help='the kv-store type', default='local', type=str)
+    parser.add_argument('--data_nthreads', help='the number of threads for preprocessing', default=8, type=int)
+    parser.add_argument('--warmup_lr', help='learning rate of warmup stage', default=0.002, type=float)
+    parser.add_argument('--warm_epoch', help='the number of epochs of warmup stage', default=12, type=int)
     args = parser.parse_args()
     return args
 
@@ -156,4 +159,7 @@ if __name__ == '__main__':
               use_difficult=args.use_difficult,
               voc07_metric=args.use_voc07_metric,
               use_horovod=args.use_horovod,
-              kv_store=args.kv_store)
+              kv_store=args.kv_store,
+              data_nthreads=args.data_nthreads,
+              warmup_lr=args.warmup_lr,
+              warm_epoch=args.warm_epoch)

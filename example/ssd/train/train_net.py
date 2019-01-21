@@ -48,7 +48,8 @@ def convert_pretrained(name, args):
     return args
 
 def get_lr_scheduler(learning_rate, lr_refactor_step, lr_refactor_ratio,
-                     num_example, batch_size, begin_epoch):
+                     num_example, batch_size, begin_epoch, num_workers=1,
+                     warmup_lr=0.002, warm_epoch=12):
     """
     Compute learning rate and refactor scheduler
 
@@ -77,16 +78,27 @@ def get_lr_scheduler(learning_rate, lr_refactor_step, lr_refactor_ratio,
         return (learning_rate, None)
     else:
         lr = learning_rate
-        epoch_size = num_example // batch_size
+        epoch_size = max(int(num_example / batch_size / num_workers), 1)
         for s in iter_refactor:
             if begin_epoch >= s:
                 lr *= lr_refactor_ratio
         if lr != learning_rate:
             logging.getLogger().info("Adjusted learning rate to {} for epoch {}".format(lr, begin_epoch))
-        steps = [epoch_size * (x - begin_epoch) for x in iter_refactor if x > begin_epoch]
+        lr_epoch_diff = [x - begin_epoch for x in iter_refactor if x > begin_epoch]
+        steps = [int(epoch * epoch_size) for epoch in lr_epoch_diff]
         if not steps:
             return (lr, None)
-        lr_scheduler = mx.lr_scheduler.MultiFactorScheduler(step=steps, factor=lr_refactor_ratio)
+        if num_workers == 1:
+            warm_epoch = 0
+        lr_scheduler = mx.lr_scheduler.MultiFactorScheduler(base_lr=lr, step=steps, factor=lr_refactor_ratio,
+                                                            warmup_mode='linear',
+                                                            warmup_begin_lr=warmup_lr,
+                                                            warmup_steps=int(warm_epoch * epoch_size))
+        lr_scheduler_str = 'using MultiFactorScheduler warmup lr: ' + str(warmup_lr) + ', warm_epoch ' + str(warm_epoch) \
+                           + ', warm_step ' + str(int(warm_epoch * epoch_size)) + ' lr: ' + str(lr) + ', lr_epoch_diff: ' \
+                           + str(lr_epoch_diff) + ', lr_iters: ' + str(steps)
+        logging.info(lr_scheduler_str)
+
         return (lr, lr_scheduler)
 
 def train_net(net, train_path, num_classes, batch_size,
@@ -94,12 +106,13 @@ def train_net(net, train_path, num_classes, batch_size,
               prefix, ctx, begin_epoch, end_epoch, frequent, learning_rate,
               momentum, weight_decay, lr_refactor_step, lr_refactor_ratio,
               freeze_layer_pattern='',
-              num_example=10000, label_pad_width=350,
+              num_example=16551, label_pad_width=350,
               nms_thresh=0.45, force_nms=False, ovp_thresh=0.5,
               use_difficult=False, class_names=None,
               voc07_metric=False, nms_topk=400, force_suppress=False,
               train_list="", val_path="", val_list="", iter_monitor=0,
-              monitor_pattern=".*", log_file=None, use_horovod=0, kv_store="local"):
+              monitor_pattern=".*", log_file=None, use_horovod=0, kv_store="local",
+              data_nthreads=8, warmup_lr=0.002, warm_epoch=12):
     """
     Wrapper for training phase.
 
@@ -201,17 +214,16 @@ def train_net(net, train_path, num_classes, batch_size,
 
 
     train_iter = DetRecordIter(train_path, batch_size, data_shape, mean_pixels=mean_pixels,
-        label_pad_width=label_pad_width, path_imglist=train_list, num_workers=num_workers, rank=rank, **cfg.train)
+        label_pad_width=label_pad_width, path_imglist=train_list, num_workers=num_workers, rank=rank, data_nthreads=data_nthreads, **cfg.train)
 
     if val_path:
         val_iter = DetRecordIter(val_path, batch_size, data_shape, mean_pixels=mean_pixels,
-            label_pad_width=label_pad_width, path_imglist=val_list, **cfg.valid)
+            label_pad_width=label_pad_width, path_imglist=val_list, data_nthreads=data_nthreads, **cfg.valid)
     else:
         val_iter = None
 
     if num_workers > 1:
-        num_examples = 16551
-        epoch_size  = max(int(num_examples / batch_size / num_workers), 1)
+        epoch_size = max(int(num_example / batch_size / num_workers), 1)
         logging.info('Resizing training data to %d batches per machine', epoch_size)
         # resize train iter to ensure each machine has same number of batches per epoch
         # if not, dist_sync can hang at the end with one machine waiting for other machines
@@ -265,9 +277,12 @@ def train_net(net, train_path, num_classes, batch_size,
 
     # fit parameters
     batch_end_callback = mx.callback.Speedometer(train_iter.batch_size, frequent=frequent)
-    epoch_end_callback = mx.callback.do_checkpoint(prefix)
+    if rank == 0:
+        epoch_end_callback = mx.callback.do_checkpoint(prefix)
+    else:
+        epoch_end_callback = None
     learning_rate, lr_scheduler = get_lr_scheduler(learning_rate, lr_refactor_step,
-        lr_refactor_ratio, num_example, batch_size, begin_epoch)
+        lr_refactor_ratio, num_example, batch_size, begin_epoch, num_workers=num_workers)
     optimizer_params={'learning_rate':learning_rate,
                       'momentum':momentum,
                       'wd':weight_decay,
