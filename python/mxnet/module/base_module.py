@@ -576,7 +576,8 @@ class BaseModule(object):
 
             #----------------------------------------
             # evaluation on validation set
-            if eval_data:
+            gaps = int(num_epoch // 50)
+            if eval_data and epoch % gaps == 0:
                 res = self.score(eval_data, validation_metric,
                                  score_end_callback=eval_end_callback,
                                  batch_end_callback=eval_batch_end_callback, epoch=epoch)

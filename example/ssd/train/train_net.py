@@ -282,7 +282,8 @@ def train_net(net, train_path, num_classes, batch_size,
     else:
         epoch_end_callback = None
     learning_rate, lr_scheduler = get_lr_scheduler(learning_rate, lr_refactor_step,
-        lr_refactor_ratio, num_example, batch_size, begin_epoch, num_workers=num_workers)
+        lr_refactor_ratio, num_example, batch_size, begin_epoch, num_workers=num_workers,
+        warmup_lr=warmup_lr, warm_epoch=warm_epoch)
     optimizer_params={'learning_rate':learning_rate,
                       'momentum':momentum,
                       'wd':weight_decay,
