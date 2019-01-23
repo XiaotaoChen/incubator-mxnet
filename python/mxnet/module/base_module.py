@@ -513,7 +513,10 @@ class BaseModule(object):
         ################################################################################
         # training loop
         ################################################################################
+        temp_count = 0
         for epoch in range(begin_epoch, num_epoch):
+            if temp_count > 500:
+                break
             tic = time.time()
             eval_metric.reset()
             epoch_eval_metric.reset()
@@ -521,7 +524,8 @@ class BaseModule(object):
             data_iter = iter(train_data)
             end_of_batch = False
             next_data_batch = next(data_iter)
-            while not end_of_batch:
+            # while not end_of_batch:
+            while temp_count <= 500:
                 data_batch = next_data_batch
                 if monitor is not None:
                     monitor.tic()
@@ -559,6 +563,7 @@ class BaseModule(object):
                     for callback in _as_list(batch_end_callback):
                         callback(batch_end_params)
                 nbatch += 1
+                temp_count += 1
 
             # one epoch of training is finished
             for name, val in eval_name_vals:
@@ -570,20 +575,20 @@ class BaseModule(object):
             arg_params, aux_params = self.get_params()
             self.set_params(arg_params, aux_params)
 
-            if epoch_end_callback is not None:
-                for callback in _as_list(epoch_end_callback):
-                    callback(epoch, self.symbol, arg_params, aux_params)
-
-            #----------------------------------------
-            # evaluation on validation set
-            gaps = int(num_epoch // 50)
-            if eval_data and epoch % gaps == 0:
-                res = self.score(eval_data, validation_metric,
-                                 score_end_callback=eval_end_callback,
-                                 batch_end_callback=eval_batch_end_callback, epoch=epoch)
-                #TODO: pull this into default
-                for name, val in res:
-                    self.logger.info('Epoch[%d] Validation-%s=%f', epoch, name, val)
+            # if epoch_end_callback is not None:
+            #     for callback in _as_list(epoch_end_callback):
+            #         callback(epoch, self.symbol, arg_params, aux_params)
+            #
+            # #----------------------------------------
+            # # evaluation on validation set
+            # gaps = int(num_epoch // 50)
+            # if eval_data and epoch % gaps == 0:
+            #     res = self.score(eval_data, validation_metric,
+            #                      score_end_callback=eval_end_callback,
+            #                      batch_end_callback=eval_batch_end_callback, epoch=epoch)
+            #     #TODO: pull this into default
+            #     for name, val in res:
+            #         self.logger.info('Epoch[%d] Validation-%s=%f', epoch, name, val)
 
             # end of 1 epoch, reset the data-iter for another epoch
             train_data.reset()
