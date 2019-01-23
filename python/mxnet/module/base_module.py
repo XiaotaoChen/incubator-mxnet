@@ -515,7 +515,7 @@ class BaseModule(object):
         ################################################################################
         temp_count = 0
         for epoch in range(begin_epoch, num_epoch):
-            if temp_count > 500:
+            if temp_count > 200:
                 break
             tic = time.time()
             eval_metric.reset()
@@ -525,7 +525,7 @@ class BaseModule(object):
             end_of_batch = False
             next_data_batch = next(data_iter)
             # while not end_of_batch:
-            while temp_count <= 500:
+            while temp_count <= 200:
                 data_batch = next_data_batch
                 if monitor is not None:
                     monitor.tic()
