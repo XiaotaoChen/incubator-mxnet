@@ -363,7 +363,7 @@ namespace mshadow{
   template<typename DType>
   void quantization_int8_weight(std::string qmod,
                                 Tensor<gpu, 3, DType> data,Tensor<gpu, 3, DType> &out,
-                                Tensor<gpu, 1, DType> aux,
+                                Tensor<gpu, 1, DType> &aux,
                                 Stream<gpu> *s,
                                 bool init){
     //find min and max
@@ -415,7 +415,7 @@ namespace mshadow{
   template<typename DType>
   void quantization_int8_act(std::string qmod,
                              Tensor<gpu, 3, DType> data,Tensor<gpu, 3, DType> &out,
-                             Tensor<gpu, 1, DType> aux,
+                             Tensor<gpu, 1, DType> &aux,
                              DType decay,Stream<gpu> *s,int quant_countdown,
                              bool init,bool is_train){
 
