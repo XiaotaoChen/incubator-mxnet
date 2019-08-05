@@ -26,7 +26,10 @@
 
 #include "./quantization_int8-inl.h"
 #include<cuda.h>
+#include <thrust/extrema.h>
+#include <thrust/execution_policy.h>
 #include "../common/cuda_utils.h"
+
 
 #define QUANT_LEVEL 255
 #define THEAD_PER_BLOCK 256
@@ -320,44 +323,8 @@ namespace mshadow{
   void Find_minmax(int num,int offset,DType *Temp,
                    DType *src_max,DType *src_min,DType *max_target,DType *min_target,
                    Stream<gpu> *s){
-    int current_num = num;
-    int pre_num;
-    int current_i;
-    DType *dst_max=Temp;
-    DType *dst_min=Temp+offset;
-    DType *inter_media;
-
-    bool first_iter = true;
-      
-    while(current_num>1){
-      //after this iteration num of ele
-      pre_num = current_num;
-      current_i = (current_num+1)/2;
-      
-      mxnet::op::mxnet_op::Kernel<mxnet::op::REDUCE_MINMAX<DType>,gpu>::Launch(s,current_i,
-                                                                              src_max,dst_max,
-                                                                              src_min,dst_min,
-                                                                              pre_num);
-
-      current_num = (current_num+2*THEAD_PER_BLOCK-1)/(THEAD_PER_BLOCK*2);
-      //current_num=current_i;
-      if(first_iter){
-        src_max = dst_max;
-        src_min = dst_min;
-        dst_max = Temp + 2*offset;
-        dst_min = Temp + 3*offset;
-        first_iter=false;
-      } else {
-        inter_media = src_max;
-        src_max = dst_max;
-        dst_max = inter_media;
-        inter_media = src_min;
-        src_min = dst_min;
-        dst_min = inter_media;
-      }
-    }
-    cudaMemcpy(max_target,src_max,sizeof(DType),cudaMemcpyDeviceToDevice);
-    cudaMemcpy(min_target,src_min,sizeof(DType),cudaMemcpyDeviceToDevice);
+    max_target = thrust::max_element(thrust::device, src_max, src_max + num);
+    min_target = thrust::min_element(thrust::device, src_min, src_min + num);
   }
 
   template<typename DType>
