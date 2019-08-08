@@ -113,6 +113,7 @@ class Quantization_int8Op : public Operator {
         quant_countdown=quant_countdown>0?quant_countdown-1:quant_countdown;
         init = false;
     }
+    fflush(stdout);
   }
   
 
@@ -149,6 +150,7 @@ class Quantization_int8Op : public Operator {
                         data,aux,
                         s);
     }
+    fflush(stdout);
   }
 
  private:

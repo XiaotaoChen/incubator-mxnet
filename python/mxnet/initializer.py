@@ -196,8 +196,11 @@ class Initializer(object):
             self._init_zero(name, arr)
         elif name.endswith("moving_avg"):
             self._init_zero(name, arr)
+        elif name.endswith("minmax"):
+            self._init_zero(name, arr)
         else:
             self._init_default(name, arr)
+            # self._init_zero(name, arr)
 
     def _init_bilinear(self, _, arr):
         weight = np.zeros(np.prod(arr.shape), dtype='float32')
