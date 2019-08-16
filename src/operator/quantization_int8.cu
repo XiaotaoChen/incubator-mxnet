@@ -301,6 +301,15 @@ namespace op {
             }
         }
     };
+
+    template <typename DType>
+    struct ABS
+    {
+        __device__ static void Map(int i, DType* src, DType* dst) {
+            DType tmp = *(src + i);
+            *(dst + i) = tmp > 0 ? tmp : -tmp;
+        }
+    };
 }
 }
 namespace mshadow {
@@ -313,6 +322,20 @@ void Find_minmax(int num, DType * src, DType * max_target, DType * min_target)
     temp = thrust::min_element(thrust::device, src, src + num);
     cudaMemcpy(min_target, temp, sizeof(DType), cudaMemcpyDeviceToDevice);
 }
+
+template <typename DType>
+void Find_abs_max(int num, DType * src, DType * max_target, DType* min_target)
+{
+    DType* temp;
+    temp = thrust::max_element(thrust::device, src, src + num);
+    cudaMemcpy(max_target, temp, sizeof(DType), cudaMemcpyDeviceToDevice);
+    DType* max_val; // on cpu
+    max_val = (DType*)malloc(sizeof(DType));
+    cudaMemcpy(max_val, temp, sizeof(DType), cudaMemcpyDeviceToHost);
+    *max_val = - (*max_val);
+    cudaMemcpy(min_target, max_val, sizeof(DType), cudaMemcpyHostToDevice);
+}
+
 /*
 // This code maybe faster. But we didn't confirm whether it is correct or wrong.
 // Here we use thrust::min_element && thrust::max_element instead.
@@ -371,8 +394,13 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
         DType* target_min;
         cudaMalloc((void**)&target_max, sizeof(DType));
         cudaMalloc((void**)&target_min, sizeof(DType));
-        //perfrom reduction , fing min max
-        Find_minmax(num, data.dptr_, target_max, target_min);
+        // //perfrom reduction , fing min max
+        // Find_minmax(num, data.dptr_, target_max, target_min);
+        DType* data_abs;
+        cudaMalloc((void**)&data_abs, sizeof(DType) * num);
+        mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
+        Find_abs_max(num, data_abs, target_max, target_min);
+
         //perform quantization
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, target_max, target_min);
         cudaFree(target_max);
@@ -405,8 +433,13 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
         DType* target_min;
         cudaMalloc((void**)&target_max, sizeof(DType));
         cudaMalloc((void**)&target_min, sizeof(DType));
-        //find the max and min first
-        Find_minmax(num, data.dptr_, target_max, target_min);
+        // //find the max and min first
+        // Find_minmax(num, data.dptr_, target_max, target_min);
+        DType* data_abs;
+        cudaMalloc((void**)&data_abs, sizeof(DType) * num);
+        mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
+        Find_abs_max(num, data_abs, target_max, target_min);
+
         //Then, update the min and max
         mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX<DType>, gpu>::Launch(s, 1, aux.dptr_, target_max, target_min, decay, init, is_train);
         //At last, caculate the result
