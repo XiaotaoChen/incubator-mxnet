@@ -334,6 +334,7 @@ void Find_abs_max(int num, DType * src, DType * max_target, DType* min_target)
     cudaMemcpy(max_val, temp, sizeof(DType), cudaMemcpyDeviceToHost);
     *max_val = - (*max_val);
     cudaMemcpy(min_target, max_val, sizeof(DType), cudaMemcpyHostToDevice);
+    free(max_val);
 }
 
 /*
@@ -405,6 +406,7 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, target_max, target_min);
         cudaFree(target_max);
         cudaFree(target_min);
+        cudaFree(data_abs);
     } else if (qmod == std::string("power2")) {
         if (init) {
             DType* target_max;
@@ -446,6 +448,7 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_ACT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_, quant_countdown, is_train);
         cudaFree(target_max);
         cudaFree(target_min);
+        cudaFree(data_abs);
     } else if (qmod == std::string("power2")) {
         if (init) {
             DType* target_max;
