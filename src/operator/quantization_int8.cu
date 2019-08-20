@@ -103,17 +103,17 @@ namespace op {
             }
             else {
                 DType S_max_f = *S_act;
-                DType S_min_f = *(S_act + 1);
+                DType S_min_f = - S_max_f;
                 DType quant_unit;
 
-                quant_unit = (S_max_f - S_min_f) / DType(QUANT_LEVEL);
+                quant_unit = 2 * S_max_f / DType(QUANT_LEVEL);
                 //use i= 0 to update the recorded max/min
                 DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);     // min(data[i], S_max_f)
                 temp = temp < S_min_f ? S_min_f : temp;                           // max(temp, S_min_f)
 
                 //Make data in [S_min_f, S_max_f]
-
-                *(out + i) = floor((temp - S_min_f) / quant_unit + 0.5) * quant_unit + S_min_f;
+                DType floor_data = floor(temp/ quant_unit);
+                *(out + i) = floor_data * quant_unit;
             }
         }
     };
@@ -423,6 +423,15 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
             cudaFree(target_max);
             cudaFree(target_min);
             cudaFree(data_abs);
+        }
+
+        cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
+        printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+
+        cudaMemcpy(tmp_data, data.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
+        printf("after update\n");
+        for (int i=0; i< num; i++) {
+            printf("i:%lf ", tmp_data[i]);
         }
 
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_ACT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_, quant_countdown, is_train);
