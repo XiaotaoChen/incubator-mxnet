@@ -69,7 +69,7 @@ template<typename DType>
 void quantization_int8_act(std::string qmod,
                            Tensor<cpu, 3, DType> data,Tensor<cpu, 3, DType> &out,
                            Tensor<cpu, 1, DType> &aux,DType decay,Stream<cpu> *s,
-                           int quant_countdown,bool init,bool is_train){
+                           int quant_countdown,bool init, int is_train){
     //the quantization function
     int dim1 = data.shape_[0];
     int dim2 = data.shape_[1];
@@ -78,7 +78,7 @@ void quantization_int8_act(std::string qmod,
     DType S_min = aux[1];
     DType S_max = aux[0];
     //find the minimum and maximum
-    if(is_train){
+    if(is_train > 0){
         S_min = data[0][0][0];
         S_max = data[0][0][0];
 

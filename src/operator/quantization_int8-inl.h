@@ -82,7 +82,6 @@ class Quantization_int8Op : public Operator {
     quant_countdown = param_.delay_quant;
     decay_rate=DType(param_.ema_decay);
     init=true;
-    is_train=param_.is_train;
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -109,7 +108,9 @@ class Quantization_int8Op : public Operator {
         quantization_int8_weight(param_.quant_mod,data,out,aux,s,init);
         init=false;
     } else {
-        quantization_int8_act(param_.quant_mod,data,out,aux,decay_rate,s,quant_countdown,init,is_train);
+        int tmp_is_train = ctx.is_train;
+        printf("is train:%d", tmp_is_train);
+        quantization_int8_act(param_.quant_mod,data,out,aux,decay_rate,s,quant_countdown,init, tmp_is_train);
         quant_countdown=quant_countdown>0?quant_countdown-1:quant_countdown;
         init = false;
     }
@@ -158,7 +159,6 @@ class Quantization_int8Op : public Operator {
   int quant_countdown;
   DType decay_rate;
   bool init;
-  bool is_train;
 
 };  // class LeakyReLUOp
 
