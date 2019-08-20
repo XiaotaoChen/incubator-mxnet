@@ -337,51 +337,6 @@ void Find_abs_max(int num, DType * src, DType * max_target, DType* min_target)
     free(max_val);
 }
 
-/*
-// This code maybe faster. But we didn't confirm whether it is correct or wrong.
-// Here we use thrust::min_element && thrust::max_element instead.
-
-void Find_minmax(int num, int offset, DType* Temp, DType* src_max, DType* src_min, DType* max_target, DType* min_target, Stream<gpu>* s)
-{
-    int current_num = num;
-    int pre_num;
-    int current_i;
-    DType* dst_max = Temp;
-    DType* dst_min = Temp + offset;
-    DType* inter_media;
-
-    bool first_iter = true;
-
-    while (current_num > 1) {
-        //after this iteration num of ele
-        pre_num = current_num;
-        current_i = (current_num + 1) / 2;
-
-        mxnet::op::mxnet_op::Kernel<mxnet::op::REDUCE_MINMAX<DType>, gpu>::Launch(s, current_i, src_max, dst_max, src_min, dst_min, pre_num);
-
-
-        current_num = (current_num + 2 * THREAD_PER_BLOCK - 1) / (THREAD_PER_BLOCK * 2);
-        //current_num=current_i;
-        if (first_iter) {
-            src_max = dst_max;
-            src_min = dst_min;
-            dst_max = Temp + 2 * offset;
-            dst_min = Temp + 3 * offset;
-            first_iter = false;
-        } else {
-            inter_media = src_max;
-            src_max = dst_max;
-            dst_max = inter_media;
-            inter_media = src_min;
-            src_min = dst_min;
-            dst_min = inter_media;
-        }
-    }
-    cudaMemcpy(max_target, src_max, sizeof(DType), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(min_target, src_min, sizeof(DType), cudaMemcpyDeviceToDevice);
-}
-*/
-
 template <typename DType>
 void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<gpu, 3, DType>& out, Tensor<gpu, 1, DType> aux, Stream<gpu>* s, bool init)
 {
@@ -442,10 +397,43 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
         mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
         Find_abs_max(num, data_abs, target_max, target_min);
 
+        DType* tmp_aux;
+        tmp_aux = (DType*) malloc(sizeof(DType) * 3);
+        cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
+        printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+
+        // cudaMemcpy(tmp_aux, target_max, sizeof(DType), cudaMemcpyDeviceToHost);
+        // cudaMemcpy(tmp_aux+1, target_min, sizeof(DType), cudaMemcpyDeviceToHost);
+        // cudaMemcpy(tmp_aux+2, &decay, sizeof(DType), cudaMemcpyDeviceToHost);
+        // printf("target max,min, decay:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+
         //Then, update the min and max
         mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX<DType>, gpu>::Launch(s, 1, aux.dptr_, target_max, target_min, decay, init, is_train);
         //At last, caculate the result
+        cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
+        printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+        
+        DType* tmp_data;
+        tmp_data = (DType*) malloc(sizeof(DType)*num);
+        cudaMemcpy(tmp_data, data.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
+        printf("before update\n");
+        for (int i=0; i< num; i++) {
+            printf("i:%lf ", tmp_data[i]);
+        }
+        printf("\n");
+
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_ACT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_, quant_countdown, is_train);
+        
+        cudaMemcpy(tmp_data, out.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
+        printf("after update\n");
+        for (int i=0; i< num; i++) {
+            printf("i:%lf ", tmp_data[i]);
+        }
+        printf("\n");
+        
+        free(tmp_aux);
+        free(tmp_data);
+
         cudaFree(target_max);
         cudaFree(target_min);
         cudaFree(data_abs);
