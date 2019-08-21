@@ -109,7 +109,7 @@ class Quantization_int8Op : public Operator {
         init=false;
     } else {
         int tmp_is_train = ctx.is_train;
-        printf("is train:%d", tmp_is_train);
+        // printf("is train:%d", tmp_is_train);
         quantization_int8_act(param_.quant_mod,data,out,aux,decay_rate,s,quant_countdown,init, tmp_is_train);
         quant_countdown=quant_countdown>0?quant_countdown-1:quant_countdown;
         init = false;

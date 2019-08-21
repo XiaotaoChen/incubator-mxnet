@@ -387,8 +387,8 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
         tmp_data = (DType*) malloc(sizeof(DType)*num);
         DType* tmp_aux;
         tmp_aux = (DType*) malloc(sizeof(DType) * 3);
-        cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
-        printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+        // cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
+        // printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
         
         if (is_train > 0) 
         {
@@ -403,44 +403,39 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
             mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
             Find_abs_max(num, data_abs, target_max, target_min);
 
-            // cudaMemcpy(tmp_aux, target_max, sizeof(DType), cudaMemcpyDeviceToHost);
-            // cudaMemcpy(tmp_aux+1, target_min, sizeof(DType), cudaMemcpyDeviceToHost);
-            // cudaMemcpy(tmp_aux+2, &decay, sizeof(DType), cudaMemcpyDeviceToHost);
-            // printf("target max,min, decay:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
-
             //Then, update the min and max
             mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX<DType>, gpu>::Launch(s, 1, aux.dptr_, target_max, target_min, decay, init);
             //At last, caculate the result
-            cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
-            printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+            // cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
+            // printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
             
-            cudaMemcpy(tmp_data, data.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
-            printf("before update\n");
-            for (int i=0; i< num; i++) {
-                printf("i:%lf ", tmp_data[i]);
-            }
-            printf("\n");
+            // cudaMemcpy(tmp_data, data.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
+            // printf("before update\n");
+            // for (int i=0; i< num; i++) {
+            //     printf("i:%lf ", tmp_data[i]);
+            // }
+            // printf("\n");
             cudaFree(target_max);
             cudaFree(target_min);
             cudaFree(data_abs);
         }
 
-        cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
-        printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
+        // cudaMemcpy(tmp_aux, aux.dptr_, sizeof(DType) * 3, cudaMemcpyDeviceToHost);
+        // printf("aux:[%lf, %lf, %lf]\n", *tmp_aux, *(tmp_aux + 1), *(tmp_aux + 2));
 
-        cudaMemcpy(tmp_data, data.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
-        printf("after update\n");
-        for (int i=0; i< num; i++) {
-            printf("i:%lf ", tmp_data[i]);
-        }
+        // cudaMemcpy(tmp_data, data.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
+        // printf("after update\n");
+        // for (int i=0; i< num; i++) {
+        //     printf("i:%lf ", tmp_data[i]);
+        // }
 
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_ACT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_, quant_countdown, is_train);
-        cudaMemcpy(tmp_data, out.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
-        printf("after update\n");
-        for (int i=0; i< num; i++) {
-            printf("i:%lf ", tmp_data[i]);
-        }
-        printf("\n");
+        // cudaMemcpy(tmp_data, out.dptr_, sizeof(DType) * num, cudaMemcpyDeviceToHost);
+        // printf("after update\n");
+        // for (int i=0; i< num; i++) {
+        //     printf("i:%lf ", tmp_data[i]);
+        // }
+        // printf("\n");
         free(tmp_data);
         free(tmp_aux);
 
