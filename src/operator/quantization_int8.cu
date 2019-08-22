@@ -48,29 +48,29 @@ namespace op {
     //         //compute quantization inside each block
     //         if (tidx == 0) {
 
-    //             S_min_f = *src_min;
-    //             S_max_f = *src_max;
+                // S_min_f = *src_min;
+                // S_max_f = *src_max;
 
-    //             //insure 0 in the range
-    //             //calculate a possible quant_unit
-    //             if (S_min_f > DType(-1e-6)) {
-    //                 S_min_f = DType(-1e-6);
-    //             }
-    //             if (S_max_f < DType(1e-6)) {
-    //                 S_max_f = DType(1e-6);
-    //             }
-    //             quant_unit = (S_max_f - S_min_f) / DType(QUANT_LEVEL);
-    //             DType delta = quant_unit + S_min_f / ceil(-S_min_f / quant_unit);
-    //             //adjust range
-    //             quant_unit = quant_unit - delta;
-    //             S_max_f = S_max_f - delta * DType(QUANT_LEVEL) / DType(2.);
-    //             S_min_f = S_min_f + delta * DType(QUANT_LEVEL) / DType(2.);
+                // //insure 0 in the range
+                // //calculate a possible quant_unit
+                // if (S_min_f > DType(-1e-6)) {
+                //     S_min_f = DType(-1e-6);
+                // }
+                // if (S_max_f < DType(1e-6)) {
+                //     S_max_f = DType(1e-6);
+                // }
+                // quant_unit = (S_max_f - S_min_f) / DType(QUANT_LEVEL);
+                // DType delta = quant_unit + S_min_f / ceil(-S_min_f / quant_unit);
+                // //adjust range
+                // quant_unit = quant_unit - delta;
+                // S_max_f = S_max_f - delta * DType(QUANT_LEVEL) / DType(2.);
+                // S_min_f = S_min_f + delta * DType(QUANT_LEVEL) / DType(2.);
     //         }
 
     //         __syncthreads();
-    //         DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);
-    //         temp = temp < S_min_f ? S_min_f : temp;
-    //         *(out + i) = floor((temp - S_min_f) / quant_unit + 0.5) * quant_unit + S_min_f;
+            // DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);
+            // temp = temp < S_min_f ? S_min_f : temp;
+            // *(out + i) = floor((temp - S_min_f) / quant_unit + 0.5) * quant_unit + S_min_f;
     //     }
     // };
 
@@ -99,20 +99,24 @@ namespace op {
     struct QUANT_WEIGHT_GPU_MINMAX {
         __device__ static void Map(int i, DType* data, DType* out, DType* src_max)
         {
-            // DType S_max_f = *src_max;
-            // DType S_min_f = - S_max_f;
-            // DType quant_unit;
+            DType S_max_f, S_min_f, quant_unit;
+            S_max_f = *src_max;
+            S_min_f = - S_max_f;
 
-            // quant_unit = S_max_f / DType(SYMETIC_QUANT_LEVLE);
-            // //use i= 0 to update the recorded max/min
-            // DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);     // min(data[i], S_max_f)
-            // temp = temp < S_min_f ? S_min_f : temp;                           // max(temp, S_min_f)
-
-            // //Make data in [S_min_f, S_max_f]
+            //calculate a possible quant_unit
+            if (S_min_f > DType(-1e-6)) {
+                S_min_f = DType(-1e-6);
+            }
+            if (S_max_f < DType(1e-6)) {
+                S_max_f = DType(1e-6);
+            }
+            quant_unit = S_max_f / DType(SYMETIC_QUANT_LEVLE);
+            DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);     // min(data[i], S_max_f)
+            temp = temp < S_min_f ? S_min_f : temp;                           // max(temp, S_min_f)
             // DType floor_data = floor(temp/ quant_unit);
-            // *(out + i) = floor_data * quant_unit;
+            DType floor_data = floor(temp/ quant_unit + 0.5);
+            *(out + i) = floor_data * quant_unit;
 
-            *(out + i) = *(data + i);
         }
     };
 
@@ -161,6 +165,14 @@ namespace op {
             }
             *S_act = S_max_f;
             *(S_act + 1) = S_min_f;
+        }
+    };
+
+    template <typename DType>
+    struct UPDATE_MINMAX_WITHOUT_DECAY {
+        __device__ static void Map(int i, DType* s_act, DType* max_S, DType* min_S) {
+            *s_act = *max_S;
+            *(s_act + 1) = *min_S;
         }
     };
 
@@ -369,35 +381,37 @@ void print_device(DType* data, int num, std::string flag) {
 }
 
 template <typename DType>
-void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<gpu, 3, DType>& out, Tensor<gpu, 1, DType> aux, Stream<gpu>* s, bool init)
+void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<gpu, 3, DType>& out, 
+                              Tensor<gpu, 1, DType> aux, Stream<gpu>* s, bool init, int is_train)
 {
     //find min and max
     int num = out.size(0) * out.size(1) * out.size(2);
     //int offset = (num + 2 * THREAD_PER_BLOCK) / (2 * THREAD_PER_BLOCK);
     //choose quantization path
     if (qmod == std::string("minmax") || init) {
-        //declare space for reduction
-        DType* target_max;
-        DType* target_min;
-        cudaMalloc((void**)&target_max, sizeof(DType));
-        cudaMalloc((void**)&target_min, sizeof(DType));
-        // //perfrom reduction , fing min max
-        // Find_minmax(num, data.dptr_, target_max, target_min);
-        DType* data_abs;
-        cudaMalloc((void**)&data_abs, sizeof(DType) * num);
-        mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
-        Find_abs_max(num, data_abs, target_max, target_min);
-        // print_device(data_abs, num, std::string("data abs"));
-        print_device(target_max, 1, std::string("target max"));
-        // print_device(data.dptr_, num, std::string("source data"));
+        if (is_train > 0) {
+            //declare space for reduction
+            DType* target_max;
+            DType* target_min;
+            cudaMalloc((void**)&target_max, sizeof(DType));
+            cudaMalloc((void**)&target_min, sizeof(DType));
+            DType* data_abs;
+            cudaMalloc((void**)&data_abs, sizeof(DType) * num);
+            mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
+            Find_abs_max(num, data_abs, target_max, target_min);
+            // print_device(data_abs, num, std::string("data abs"));
+            print_device(target_max, 1, std::string("target max"));
+            // print_device(data.dptr_, num, std::string("source data"));
+            // print_device(out.dptr_, num, std::string("quantized data"));
+            mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, 
+            target_max, target_min);
+            cudaFree(target_max);
+            cudaFree(target_min);
+            cudaFree(data_abs);
+        }
         //perform quantization
-        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, target_max);
-
-        // print_device(out.dptr_, num, std::string("quantized data"));
-
-        cudaFree(target_max);
-        cudaFree(target_min);
-        cudaFree(data_abs);
+        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_);
+        
     } else if (qmod == std::string("power2")) {
         if (init) {
             DType* target_max;
@@ -415,8 +429,9 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
     }
 }
 template <typename DType>
-void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<gpu, 3, DType>& out, Tensor<gpu, 1, DType> &aux,
-                           DType decay, Stream<gpu>* s, int quant_countdown, bool init, int is_train)
+void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<gpu, 3, DType>& out, 
+                           Tensor<gpu, 1, DType> &aux, DType decay, Stream<gpu>* s, 
+                           int quant_countdown, bool init, int is_train)
 {
 
     int num = out.size(0) * out.size(1) * out.size(2);
