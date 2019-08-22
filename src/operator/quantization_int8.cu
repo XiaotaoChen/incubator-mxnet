@@ -102,20 +102,11 @@ namespace op {
             DType S_max_f, S_min_f, quant_unit;
             S_max_f = *src_max;
             S_min_f = - S_max_f;
-
-            //calculate a possible quant_unit
-            if (S_min_f > DType(-1e-6)) {
-                S_min_f = DType(-1e-6);
-            }
-            if (S_max_f < DType(1e-6)) {
-                S_max_f = DType(1e-6);
-            }
             quant_unit = S_max_f / DType(SYMETIC_QUANT_LEVLE);
             DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);     // min(data[i], S_max_f)
             temp = temp < S_min_f ? S_min_f : temp;                           // max(temp, S_min_f)
-            // DType floor_data = floor(temp/ quant_unit);
-            DType floor_data = floor(temp/ quant_unit + 0.5);
-            *(out + i) = floor_data * quant_unit;
+            DType round_data = round(temp/ quant_unit);
+            *(out + i) = round_data * quant_unit;
 
         }
     };
@@ -138,8 +129,8 @@ namespace op {
                 temp = temp < S_min_f ? S_min_f : temp;                           // max(temp, S_min_f)
 
                 //Make data in [S_min_f, S_max_f]
-                DType floor_data = floor(temp/ quant_unit);
-                *(out + i) = floor_data * quant_unit;
+                DType round_data = round(temp/ quant_unit);
+                *(out + i) = round_data * quant_unit;
             }
         }
     };
@@ -410,6 +401,7 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
             cudaFree(data_abs);
         }
         //perform quantization
+        print_device(aux.dptr_, 2, std::string("weight aux"));
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_);
         
     } else if (qmod == std::string("power2")) {
