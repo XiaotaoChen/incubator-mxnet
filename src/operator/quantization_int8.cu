@@ -380,28 +380,27 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
     //int offset = (num + 2 * THREAD_PER_BLOCK) / (2 * THREAD_PER_BLOCK);
     //choose quantization path
     if (qmod == std::string("minmax") || init) {
-        if (is_train > 0) {
+        // if (is_train > 0) {
             //declare space for reduction
-            DType* target_max;
-            DType* target_min;
-            cudaMalloc((void**)&target_max, sizeof(DType));
-            cudaMalloc((void**)&target_min, sizeof(DType));
-            DType* data_abs;
-            cudaMalloc((void**)&data_abs, sizeof(DType) * num);
-            mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
-            Find_abs_max(num, data_abs, target_max, target_min);
-            // print_device(data_abs, num, std::string("data abs"));
-            print_device(target_max, 1, std::string("target max"));
-            // print_device(data.dptr_, num, std::string("source data"));
-            // print_device(out.dptr_, num, std::string("quantized data"));
-            mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, 
-            target_max, target_min);
-            cudaFree(target_max);
-            cudaFree(target_min);
-            cudaFree(data_abs);
-        }
+        DType* target_max;
+        DType* target_min;
+        cudaMalloc((void**)&target_max, sizeof(DType));
+        cudaMalloc((void**)&target_min, sizeof(DType));
+        DType* data_abs;
+        cudaMalloc((void**)&data_abs, sizeof(DType) * num);
+        mxnet::op::mxnet_op::Kernel<mxnet::op::ABS<DType>, gpu>::Launch(s, num, data.dptr_, data_abs);
+        Find_abs_max(num, data_abs, target_max, target_min);
+        // print_device(data_abs, num, std::string("data abs"));
+        // print_device(data.dptr_, num, std::string("source data"));
+        // print_device(out.dptr_, num, std::string("quantized data"));
+        mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, 
+        target_max, target_min);
+        cudaFree(target_max);
+        cudaFree(target_min);
+        cudaFree(data_abs);
+        // }
         //perform quantization
-        print_device(aux.dptr_, 2, std::string("weight aux"));
+        // print_device(aux.dptr_, 2, std::string("weight aux"));
         mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_);
         
     } else if (qmod == std::string("power2")) {
