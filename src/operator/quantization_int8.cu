@@ -65,7 +65,7 @@ namespace op {
         __device__ static void Map(int i, DType* data, DType* out, DType* src_max)
         {
             DType S_max_f, S_min_f, quant_unit;
-            S_max_f = *src_max;
+            S_max_f = *src_max > DType(1.e-6) ? *src_max: DType(1e-6);
             S_min_f = - S_max_f;
             quant_unit = S_max_f / DType(SYMETIC_QUANT_LEVLE);
             DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);     // min(data[i], S_max_f)
