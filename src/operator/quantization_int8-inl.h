@@ -104,16 +104,21 @@ class Quantization_int8Op : public Operator {
     data = in_data[Quantization_int8::kData].get_with_shape<xpu, 3, DType>(dshape, s);
     out = out_data[Quantization_int8::kOut].get_with_shape<xpu, 3, DType>(dshape, s);
     aux = aux_args[Quantization_int8::kMinmax].get<xpu, 1, DType>(s);
-    int tmp_is_train = ctx.is_train;
-    // printf("is train:%d", tmp_is_train);
-    if(param_.is_weight){
-        quantization_int8_weight(param_.quant_mod,data,out,aux,s,init, tmp_is_train);
-        init=false;
-    } else {
-        quantization_int8_act(param_.quant_mod,data,out,aux,decay_rate,s,quant_countdown,init, tmp_is_train);
-        quant_countdown=quant_countdown>0?quant_countdown-1:quant_countdown;
-        init = false;
+    int is_train = ctx.is_train;
+    if (is_train > 0 && quant_countdown > 0) {
+      mshadow::Copy(out, data, s);
+      quant_countdown = quant_countdown - 1;
     }
+    else {
+      if(param_.is_weight){
+          quantization_int8_weight(param_.quant_mod,data,out,aux,s,init, is_train);
+          init=false;
+      } else {
+          quantization_int8_act(param_.quant_mod,data,out,aux,decay_rate,s,quant_countdown,init, is_train);
+          init = false;
+      }
+    }
+    
     fflush(stdout);
   }
   

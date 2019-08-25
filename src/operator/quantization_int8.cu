@@ -39,7 +39,7 @@ namespace mxnet {
 namespace op {
 
     template <typename DType>
-    struct QUANT_WEIGHT_GPU_POWER2 {
+    struct QUANT_DATA_POWER2 {
         __device__ static void Map(int i, DType* data, DType* out, DType* log2t)
         {
 
@@ -48,19 +48,20 @@ namespace op {
             int tidx = threadIdx.x;
             //compute quantization inside each block
             if (tidx < 1) {
-                quant_unit = (::pow(2.0, ::ceil(*log2t)) * DType(2.0)) / DType(QUANT_LEVEL);
+                quant_unit = ::pow(2.0, ::ceil(*log2t)) / DType(SYMETIC_QUANT_LEVLE);
             }
 
             __syncthreads();
-            DType int8_val = DType(floor(*(data + i) / quant_unit + 0.5));
-            int8_val = int8_val > DType(QUANT_LEVEL / 2 - 1) ? DType(QUANT_LEVEL / 2 - 1) : int8_val;
-            int8_val = int8_val < -DType(QUANT_LEVEL / 2) ? -DType(QUANT_LEVEL / 2) : int8_val;
+            // DType int8_val = DType(floor(*(data + i) / quant_unit + 0.5));
+            DType int8_val = DType(round(*(data + i) / quant_unit));
+            int8_val = int8_val > DType(SYMETIC_QUANT_LEVLE) ? DType(SYMETIC_QUANT_LEVLE) : int8_val;
+            int8_val = int8_val < -DType(SYMETIC_QUANT_LEVLE) ? -DType(SYMETIC_QUANT_LEVLE) : int8_val;
             *(out + i) = int8_val * quant_unit;
         }
     };
 
     template <typename DType>
-    struct QUANT_WEIGHT_GPU_MINMAX {
+    struct QUANT_DATA_MINMAX {
         __device__ static void Map(int i, DType* data, DType* out, DType* src_max)
         {
             DType S_max_f, S_min_f, quant_unit;
@@ -72,30 +73,6 @@ namespace op {
             DType round_data = round(temp/ quant_unit);
             *(out + i) = round_data * quant_unit;
 
-        }
-    };
-
-    template <typename DType>
-    struct QUANT_ACT_GPU_MINMAX {
-        __device__ static void Map(int i, DType* data, DType* out, DType* S_act, int quant_countdown, int is_train)
-        {
-            if (quant_countdown > 0 && is_train > 0) {
-                *(out + i) = *(data + i);
-            }
-            else {
-                DType S_max_f = *S_act;
-                DType S_min_f = - S_max_f;
-                DType quant_unit;
-
-                quant_unit = S_max_f / DType(SYMETIC_QUANT_LEVLE);
-                //use i= 0 to update the recorded max/min
-                DType temp = *(data + i) > S_max_f ? S_max_f : *(data + i);     // min(data[i], S_max_f)
-                temp = temp < S_min_f ? S_min_f : temp;                           // max(temp, S_min_f)
-
-                //Make data in [S_min_f, S_max_f]
-                DType round_data = round(temp/ quant_unit);
-                *(out + i) = round_data * quant_unit;
-            }
         }
     };
 
@@ -121,9 +98,9 @@ namespace op {
             *(s_act + 1) = - (*max_S);
         }
     };
-
+    // the gradients of q(x,s) of log2t
     template <typename DType>
-    struct GRAD_POWER2 {
+    struct DATA_GRAD_POWER2 {
         __device__ static void Map(int i, DType* data, DType* gdata, DType* out, DType* log2t)
         {
             __shared__ DType quant_unit;
@@ -131,18 +108,18 @@ namespace op {
             int tidx = threadIdx.x;
             //compute quantization inside each block
             if (tidx < 1) {
-                quant_unit = (::pow(2.0, ::ceil(*log2t)) * DType(2.0)) / DType(QUANT_LEVEL);
+                quant_unit = ::pow(2.0, ::ceil(*log2t)) / DType(SYMETIC_QUANT_LEVLE);
             }
             __syncthreads();
 
-            DType int8_val = DType(floor(*(data + i) / quant_unit + 0.5));
+            DType int8_val = DType(round(*(data + i) / quant_unit));
             //int8_val=int8_val>DType(QUANT_LEVEL/2-1)?DType(QUANT_LEVEL/2-1):int8_val;
             //int8_val=int8_val<-DType(QUANT_LEVEL/2)?-DType(QUANT_LEVEL/2):int8_val;
             DType dv_ds = int8_val - (*(data + i) / quant_unit);
-            if (int8_val > DType(QUANT_LEVEL / 2 - 1)) {
-                dv_ds = DType(QUANT_LEVEL / 2 - 1);
-            } else if (int8_val < -DType(QUANT_LEVEL / 2)) {
-                dv_ds = -DType(QUANT_LEVEL / 2);
+            if (int8_val > DType(SYMETIC_QUANT_LEVLE)) {
+                dv_ds = DType(SYMETIC_QUANT_LEVLE);
+            } else if (int8_val < -DType(SYMETIC_QUANT_LEVLE)) {
+                dv_ds = -DType(SYMETIC_QUANT_LEVLE);
             }
             DType local_grad = logf(2.0) * quant_unit * dv_ds;
 
@@ -159,13 +136,13 @@ namespace op {
             int tidx = threadIdx.x;
             //compute quantization inside each block
             if (tidx < 1) {
-                quant_unit = (::pow(2.0, ::ceil(*log2t)) * DType(2.0)) / DType(QUANT_LEVEL);
+                quant_unit = ::pow(2.0, ::ceil(*log2t)) / DType(SYMETIC_QUANT_LEVLE);
             }
             __syncthreads();
 
-            DType int8_val = DType(floor(*(data + i) / quant_unit + 0.5));
-            DType factor = int8_val > DType(QUANT_LEVEL / 2 - 1) ? DType(0.) : DType(1.);
-            factor = int8_val < -DType(QUANT_LEVEL / 2) ? DType(0.) : factor;
+            DType int8_val = DType(round(*(data + i) / quant_unit));
+            DType factor = int8_val > DType(SYMETIC_QUANT_LEVLE) ? DType(0.) : DType(1.);
+            factor = int8_val < -DType(SYMETIC_QUANT_LEVLE) ? DType(0.) : factor;
 
             *(out + i) = *(gdata + i) * factor;
         }
@@ -247,7 +224,7 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
     int num = out.size(0) * out.size(1) * out.size(2);
     //int offset = (num + 2 * THREAD_PER_BLOCK) / (2 * THREAD_PER_BLOCK);
     //choose quantization path
-    if (qmod == std::string("minmax") || init) {
+    if (qmod == std::string("minmax")) {
         DType* target_max;
         cudaMalloc((void**)&target_max, sizeof(DType));
         //perfrom reduction , fing min max
@@ -255,19 +232,24 @@ void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tens
         mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, 
         target_max);
         // print_device(aux.dptr_, 2, std::string("weight aux"));
-        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_);
+        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_DATA_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_);
         
     } else if (qmod == std::string("power2")) {
+        // print_device<DType>(aux.dptr_, 3, std::string("power2 w aux"));
         if (is_train > 0 && init) {
             DType* target_max;
             cudaMalloc((void**)&target_max, sizeof(DType));
             Find_max(num, data.dptr_, target_max);
             mxnet::op::mxnet_op::Kernel<mxnet::op::INIT_LOG2T<DType>, gpu>::Launch(s, 1, aux.dptr_, target_max);
+            // print_device<DType>(target_max, 1, std::string("power2 w target max"));
+            // print_device<DType>(aux.dptr_, 3, std::string("power2 w aux"));
             cudaFree(target_max);
         }
-        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_POWER2<DType>, gpu>::Launch(s, num,
+        // print_device<DType>(data.dptr_, num, std::string("power2 w data"));
+        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_DATA_POWER2<DType>, gpu>::Launch(s, num,
             data.dptr_, out.dptr_,
             aux.dptr_);
+        // print_device<DType>(out.dptr_, num, std::string("power2 w out"));
     }
 }
 template <typename DType>
@@ -281,7 +263,7 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
     if (qmod == std::string("minmax")) {
         if (is_train > 0) 
         {
-            print_device<DType>(data.dptr_, num, std::string("act data"));
+            // print_device<DType>(data.dptr_, num, std::string("act data"));
             DType* target_max;
             cudaMalloc((void**)&target_max, sizeof(DType));
             //find the max and min first
@@ -296,23 +278,28 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
             }
             
             cudaFree(target_max);
-            print_device<DType>(aux.dptr_, 3, std::string("act aux"));
+            // print_device<DType>(aux.dptr_, 3, std::string("act aux"));
         }
-
-        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_ACT_GPU_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, 
-                                                                                         aux.dptr_, quant_countdown, is_train);
-        print_device<DType>(out.dptr_, num, std::string("act out"));
+        mxnet::op::mxnet_op::Kernel<
+          mxnet::op::QUANT_DATA_MINMAX<DType>, gpu>::Launch(
+              s, num, data.dptr_, out.dptr_, aux.dptr_);
+        // print_device<DType>(out.dptr_, num, std::string("act out"));
     } else if (qmod == std::string("power2")) {
-        if (init) {
+        // print_device<DType>(aux.dptr_, 3, std::string("power2 act aux"));
+        if (is_train > 0 && init) {
             DType* target_max;
             cudaMalloc((void**)&target_max, sizeof(DType));
             Find_max(num, data.dptr_, target_max);
             mxnet::op::mxnet_op::Kernel<mxnet::op::INIT_LOG2T<DType>, gpu>::Launch(s, 1, aux.dptr_, target_max);
+            // print_device<DType>(target_max, 1, std::string("power2 act target max"));
+            // print_device<DType>(aux.dptr_, 3, std::string("power2 act aux"));
             cudaFree(target_max);
         }
-        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_WEIGHT_GPU_POWER2<DType>, gpu>::Launch(s, num,
+        // print_device<DType>(data.dptr_, num, std::string("power2 act data"));
+        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_DATA_POWER2<DType>, gpu>::Launch(s, num,
             data.dptr_, out.dptr_,
             aux.dptr_);
+        // print_device<DType>(out.dptr_, num, std::string("power2 act out"));
     }
 }
 
@@ -322,7 +309,7 @@ void quantization_grad(std::string qmod, Tensor<gpu, 3, DType>& gdata, Tensor<gp
 {
     int num = grad.size(0) * grad.size(1) * grad.size(2);
     //The gdata is only a temporary variable here. The GRAD_WEIGHT_POWER2 is where it get the true value.
-    mxnet::op::mxnet_op::Kernel<mxnet::op::GRAD_POWER2<DType>, gpu>::Launch(s, num, data.dptr_, grad.dptr_, gdata.dptr_, aux.dptr_);
+    mxnet::op::mxnet_op::Kernel<mxnet::op::DATA_GRAD_POWER2<DType>, gpu>::Launch(s, num, data.dptr_, grad.dptr_, gdata.dptr_, aux.dptr_);
     //compute grad
     DType * res;
     cudaMalloc((void**)&res, sizeof(DType));
@@ -330,8 +317,11 @@ void quantization_grad(std::string qmod, Tensor<gpu, 3, DType>& gdata, Tensor<gp
     mxnet::op::mxnet_op::Kernel<mxnet::op::GRAD_WEIGHT_POWER2<DType>, gpu>::Launch(s, num, data.dptr_, grad.dptr_, gdata.dptr_, aux.dptr_);
     //update aux
     cudaMemcpy(res, &temp, sizeof(DType), cudaMemcpyHostToDevice);
+    // print_device<DType>(res, 1, std::string("power2 res"));
+    // print_device<DType>(aux.dptr_, 1, std::string("power2 grad aux"));
     //Move it to a CUDA memory. Then it can launch the UPDATE_LOG2T correctly.(It is execute in cuda.)
     mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_LOG2T<DType>, gpu>::Launch(s, 1, aux.dptr_, res);
+    // print_device<DType>(aux.dptr_, 1, std::string("power2 grad aux"));
 }
 }
 
