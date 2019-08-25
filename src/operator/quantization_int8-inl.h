@@ -233,20 +233,20 @@ class Quantization_int8Prop : public OperatorProperty {
   }
 
   // decalre dependency and inplace optimization options
-  std::vector<int> DeclareBackwardDependency(
-    const std::vector<int> &out_grad,
-    const std::vector<int> &in_data,
-    const std::vector<int> &out_data) const override {
-    return {out_grad[Quantization_int8::kOut], out_data[Quantization_int8::kData]};
-  }
+  // std::vector<int> DeclareBackwardDependency(
+  //   const std::vector<int> &out_grad,
+  //   const std::vector<int> &in_data,
+  //   const std::vector<int> &out_data) const override {
+  //   return {out_grad[Quantization_int8::kOut], out_data[Quantization_int8::kData]};
+  // }
 
-  std::vector<std::pair<int, void*> > BackwardInplaceOption(
-    const std::vector<int> &out_grad,
-    const std::vector<int> &in_data,
-    const std::vector<int> &out_data,
-    const std::vector<void*> &in_grad) const override {
-    return {{out_grad[Quantization_int8::kOut], in_grad[Quantization_int8::kData]}};
-  }
+  // std::vector<std::pair<int, void*> > BackwardInplaceOption(
+  //   const std::vector<int> &out_grad,
+  //   const std::vector<int> &in_data,
+  //   const std::vector<int> &out_data,
+  //   const std::vector<void*> &in_grad) const override {
+  //   return {{out_grad[Quantization_int8::kOut], in_grad[Quantization_int8::kData]}};
+  // }
 
   std::vector<std::pair<int, void*> > ForwardInplaceOption(
     const std::vector<int> &in_data,
