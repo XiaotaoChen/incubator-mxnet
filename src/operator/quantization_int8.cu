@@ -86,7 +86,6 @@ namespace op {
                 S_max_f = 1e-6;
             }
             *S_act = S_max_f;
-            *(S_act + 1) = - S_max_f;
         }
         //Update with EMA.
     };
@@ -95,7 +94,6 @@ namespace op {
     struct UPDATE_MINMAX_WITHOUT_DECAY {
         __device__ static void Map(int i, DType* s_act, DType* max_S) {
             *s_act = *max_S;
-            *(s_act + 1) = - (*max_S);
         }
     };
     // the gradients of q(x,s) of log2t
@@ -218,22 +216,34 @@ void print_device(DType* data, int num, std::string flag) {
 
 template <typename DType>
 void quantization_int8_weight(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<gpu, 3, DType>& out, 
-                              Tensor<gpu, 1, DType> aux, Stream<gpu>* s, bool init, int is_train)
+                              Tensor<gpu, 1, DType> aux, Stream<gpu>* s, bool init, int is_train,
+                              bool is_weight_perchannel)
 {
-    //find min and max
+    int channels = 1;
+    // the count of each channel
     int num = out.size(0) * out.size(1) * out.size(2);
+    if (is_weight_perchannel) {
+        channels = out.size(0);    
+        num = out.size(1) * out.size(2);
+    }
     //int offset = (num + 2 * THREAD_PER_BLOCK) / (2 * THREAD_PER_BLOCK);
     //choose quantization path
     if (qmod == std::string("minmax")) {
         DType* target_max;
-        cudaMalloc((void**)&target_max, sizeof(DType));
-        //perfrom reduction , fing min max
-        Find_max(num, data.dptr_, target_max);
-        mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, 
-        target_max);
-        // print_device(aux.dptr_, 2, std::string("weight aux"));
-        mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_DATA_MINMAX<DType>, gpu>::Launch(s, num, data.dptr_, out.dptr_, aux.dptr_);
-        
+        cudaMalloc((void**)&target_max, sizeof(DType) * channels);
+        //perfrom reduction , find min max
+        for (int i=0; i< channels; i++) {
+            DType* channel_data_dptr = static_cast<DType*>(data.dptr_ + i * num);
+            DType*  channel_target_max = static_cast<DType*>(target_max + i);
+            DType* channel_aux_dptr = static_cast<DType*>(aux.dptr_ + i);
+            DType* channel_out_dptr = static_cast<DType*>(out.dptr_ + i * num);
+            Find_max(num, channel_data_dptr, channel_target_max);
+            mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(
+                s, 1, channel_aux_dptr, channel_target_max);
+            mxnet::op::mxnet_op::Kernel<mxnet::op::QUANT_DATA_MINMAX<DType>, gpu>::Launch(
+                s, num, channel_data_dptr, channel_out_dptr, channel_aux_dptr);
+        }
+        cudaFree(target_max);
     } else if (qmod == std::string("power2")) {
         // print_device<DType>(aux.dptr_, 3, std::string("power2 w aux"));
         if (is_train > 0 && init) {
@@ -257,26 +267,22 @@ void quantization_int8_act(std::string qmod, Tensor<gpu, 3, DType> data, Tensor<
                            Tensor<gpu, 1, DType> &aux, DType decay, Stream<gpu>* s, 
                            int quant_countdown, bool init, int is_train)
 {
-
     int num = out.size(0) * out.size(1) * out.size(2);
-    //int offset = (num + 2 * THREAD_PER_BLOCK) / (2 * THREAD_PER_BLOCK);
     if (qmod == std::string("minmax")) {
         if (is_train > 0) 
         {
             // print_device<DType>(data.dptr_, num, std::string("act data"));
             DType* target_max;
             cudaMalloc((void**)&target_max, sizeof(DType));
-            //find the max and min first
             Find_max(num, data.dptr_, target_max);
-            //Then, update the min and max
             if (init) {
-              mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, 
-                target_max);
+                mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITHOUT_DECAY<DType>, gpu>::Launch(
+                    s, 1, aux.dptr_, target_max);
             }
             else {
-              mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITH_DECAY<DType>, gpu>::Launch(s, 1, aux.dptr_, target_max, decay);
+                mxnet::op::mxnet_op::Kernel<mxnet::op::UPDATE_MINMAX_WITH_DECAY<DType>, gpu>::Launch(
+                    s, 1, aux.dptr_, target_max, decay);
             }
-            
             cudaFree(target_max);
             // print_device<DType>(aux.dptr_, 3, std::string("act aux"));
         }

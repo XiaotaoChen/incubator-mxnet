@@ -56,6 +56,7 @@ enum Quantization_int8OpResource {kRandom};
 struct Quantization_int8Para : public dmlc::Parameter<Quantization_int8Para> {
   // use int for enumeration
   bool is_weight;
+  bool is_weight_perchannel;
   bool is_train;
   int delay_quant;
   float ema_decay;
@@ -63,6 +64,8 @@ struct Quantization_int8Para : public dmlc::Parameter<Quantization_int8Para> {
   DMLC_DECLARE_PARAMETER(Quantization_int8Para) {
     DMLC_DECLARE_FIELD(is_weight).set_default(true)
     .describe("if true, this quantization layer is used for weight");
+    DMLC_DECLARE_FIELD(is_weight_perchannel).set_default(false)
+    .describe("if true, this quantization layer is used for weight with per channel quantize");
     DMLC_DECLARE_FIELD(is_train).set_default(true)
     .describe("if true, this quantization layer is used for training");
     DMLC_DECLARE_FIELD(delay_quant).set_default(2000)
@@ -97,7 +100,9 @@ class Quantization_int8Op : public Operator {
     Tensor<xpu, 3, DType> data;
     Tensor<xpu, 3, DType> out;
     Tensor<xpu, 1, DType> aux;
-
+    // for weight per channel, OIHW, the axis should be the O dimension
+    // for all per channel, OIHW the axis should be the I dimension, currently this is not considered
+    // transpose conv weight is also not considered
     int n = in_data[Quantization_int8::kData].shape_[0];
     int k = (in_data[Quantization_int8::kData].ndim() > 1) ? in_data[Quantization_int8::kData].shape_[1] : 1;
     Shape<3> dshape = Shape3(n, k, in_data[Quantization_int8::kData].Size()/n/k);
@@ -111,7 +116,7 @@ class Quantization_int8Op : public Operator {
     }
     else {
       if(param_.is_weight){
-          quantization_int8_weight(param_.quant_mod,data,out,aux,s,init, is_train);
+          quantization_int8_weight(param_.quant_mod,data,out,aux,s,init, is_train, param_.is_weight_perchannel);
           init=false;
       } else {
           quantization_int8_act(param_.quant_mod,data,out,aux,decay_rate,s,quant_countdown,init, is_train);
@@ -188,7 +193,10 @@ class Quantization_int8Prop : public OperatorProperty {
 
     CHECK_EQ(in_shape->size(), 1U) << "Input:[data]";
     const TShape &dshape = in_shape->at(Quantization_int8::kData);
-    const Shape<1> dshape_aux = Shape1(3);
+    // the weight per channel axis is 0
+    const uint32_t quant_channels = dshape[0];
+    // to cover the quantize input is data, the axis=0 is the batch size
+    const Shape<1> dshape_aux = Shape1(quant_channels+2);
     //const TShape dshape_aux = shape_aux;
     
     if (dshape.ndim() == 0) return false;
