@@ -18,12 +18,12 @@
  */
 /*!
  * Copyright (c) 2018 by Contributors
- * \file sync_batch_norm-inl.h
- * \brief Synchronized BatchNorm modified from BatchNormV1
- * \author Hang Zhang, Yuntao Chen
+ * \file sync_inplace_activation_batch_norm-inl.h
+ * \brief Synchronized Inplace Activation BatchNorm from Mapillary
+ * \author Yuntao Chen
 */
-#ifndef MXNET_OPERATOR_CONTRIB_SYNC_BATCH_NORM_INL_H_
-#define MXNET_OPERATOR_CONTRIB_SYNC_BATCH_NORM_INL_H_
+#ifndef MXNET_OPERATOR_CONTRIB_SYNC_INPLACE_ACTIVATION_BATCH_NORM_INL_H_
+#define MXNET_OPERATOR_CONTRIB_SYNC_INPLACE_ACTIVATION_BATCH_NORM_INL_H_
 
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
@@ -39,27 +39,30 @@
 namespace mxnet {
 namespace op {
 
-namespace syncbatchnorm {
+namespace sync_inplace_abn {
 enum BatchNormOpInputs {kData, kGamma, kBeta};
 enum BatchNormOpOutputs {kOut, kMean, kVar};
 enum BatchNormOpAuxiliary {kMovingMean, kMovingVar};
 enum BatchNormBackResource {kTempSpace};
-}  // namespace syncbatchnorm
+}  // namespace sync_inplace_abn
 
-struct SyncBatchNormParam : public dmlc::Parameter<SyncBatchNormParam> {
+struct SyncInplaceABNParam : public dmlc::Parameter<SyncInplaceABNParam> {
   float eps;
   float momentum;
+  float relu_slope;
   bool fix_gamma;
   bool use_global_stats;
   bool output_mean_var;
   int ndev;
   std::string key;
-  DMLC_DECLARE_PARAMETER(SyncBatchNormParam) {
+  DMLC_DECLARE_PARAMETER(SyncInplaceABNParam) {
     DMLC_DECLARE_FIELD(eps).set_default(1e-3f)
     .describe("Epsilon to prevent div 0");
     DMLC_DECLARE_FIELD(momentum).set_default(0.9f)
     .describe("Momentum for moving average");
-    DMLC_DECLARE_FIELD(fix_gamma).set_default(true)
+    DMLC_DECLARE_FIELD(relu_slope).set_default(1e-3f)
+    .describe("Slope of leaky relu");
+    DMLC_DECLARE_FIELD(fix_gamma).set_default(false)
     .describe("Fix gamma while training");
     DMLC_DECLARE_FIELD(use_global_stats).set_default(false)
     .describe("Whether use global moving statistics instead of local batch-norm. "
@@ -71,10 +74,11 @@ struct SyncBatchNormParam : public dmlc::Parameter<SyncBatchNormParam> {
     DMLC_DECLARE_FIELD(key)
       .set_default("")
       .describe("Hash key for synchronization, please set the same hash key for same layer, "
-                "Block.prefix is typically used as in :class:`gluon.nn.contrib.SyncBatchNorm`.");
+                "Block.prefix is typically used as in :class:`gluon.nn.contrib.SyncInplaceABN`.");
   }
 };
 
+namespace {
 // Modified from https://github.com/brucechin/SharedTensor
 template<class T>
 class SharedND {
@@ -243,10 +247,12 @@ static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_var
 static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_grad;
 static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_prod;
 
+} // namespace
+
 template<typename xpu>
-class SyncBatchNorm : public Operator {
+class SyncInplaceABN : public Operator {
  public:
-  explicit SyncBatchNorm(SyncBatchNormParam param) {
+  explicit SyncInplaceABN(SyncInplaceABNParam param) {
     this->param_ = param;
   }
 
@@ -267,55 +273,47 @@ class SyncBatchNorm : public Operator {
     } else {
       CHECK_GE(out_data.size(), 1U);
       CHECK_GE(req.size(), 1U);
-      CHECK_EQ(req[syncbatchnorm::kOut], kWriteTo);
+      CHECK_EQ(req[sync_inplace_abn::kOut], kWriteTo);
     }
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-      MSHADOW_TYPE_SWITCH(in_data[syncbatchnorm::kData].type_flag_, DType, {
+    MSHADOW_TYPE_SWITCH(in_data[sync_inplace_abn::kData].type_flag_, DType, {
       const bool is_double = std::is_same<DType, double>::value;
       CHECK_EQ(is_double, false)
         << "Synchronized BatchNorm does not support double-precision floating number yet...";
-      const real_t scale = static_cast<real_t>(in_data[syncbatchnorm::kData].shape_[1]) /
-        static_cast<real_t>(in_data[syncbatchnorm::kData].shape_.Size());
-      const size_t data_size = in_data[syncbatchnorm::kData].Size();
+      const real_t scale = static_cast<real_t>(in_data[sync_inplace_abn::kData].shape_[1]) /
+        static_cast<real_t>(in_data[sync_inplace_abn::kData].shape_.Size()); // NHW normalizer
+      const size_t data_size = in_data[sync_inplace_abn::kData].Size();
       Tensor<xpu, 4> data;
       Tensor<xpu, 4> out;
       Tensor<xpu, 1> workspace;
       if (!std::is_same<DType, real_t>::value) {
-        workspace = ctx.requested[syncbatchnorm::kTempSpace].get_space<xpu, 1>(
+        workspace = ctx.requested[sync_inplace_abn::kTempSpace].get_space<xpu, 1>(
           Shape1(data_size * 2), s);
       }
-      if (in_data[syncbatchnorm::kData].ndim() == 2) {
-        Shape<4> dshape = Shape4(in_data[syncbatchnorm::kData].shape_[0],
-                                 in_data[syncbatchnorm::kData].shape_[1], 1, 1);
-        if (std::is_same<DType, real_t>::value) {
-          data = in_data[syncbatchnorm::kData].get_with_shape<xpu, 4, real_t>(dshape, s);
-          out = out_data[syncbatchnorm::kOut].get_with_shape<xpu, 4, real_t>(dshape, s);
-        } else {
-          data = Tensor<xpu, 4>(workspace.dptr_, dshape, s);
-          out = Tensor<xpu, 4>(workspace.dptr_ + data_size, dshape, s);
-        }
+      if (in_data[sync_inplace_abn::kData].ndim() == 2) {
+        LOG(FATAL) << "Input layouts other than NCHW are not implemented.";
       } else {
         if (std::is_same<DType, real_t>::value) {
-          data = in_data[syncbatchnorm::kData].get<xpu, 4, real_t>(s);
-          out = out_data[syncbatchnorm::kOut].get<xpu, 4, real_t>(s);
+          data = in_data[sync_inplace_abn::kData].get<xpu, 4, real_t>(s);
+          out = out_data[sync_inplace_abn::kOut].get<xpu, 4, real_t>(s);
         } else {
-          Shape<4> dshape = Shape4(in_data[syncbatchnorm::kData].shape_[0],
-                                   in_data[syncbatchnorm::kData].shape_[1],
-                                   in_data[syncbatchnorm::kData].shape_[2],
-                                   in_data[syncbatchnorm::kData].shape_[3]);
+          Shape<4> dshape = Shape4(in_data[sync_inplace_abn::kData].shape_[0],
+                                   in_data[sync_inplace_abn::kData].shape_[1],
+                                   in_data[sync_inplace_abn::kData].shape_[2],
+                                   in_data[sync_inplace_abn::kData].shape_[3]);
           data = Tensor<xpu, 4>(workspace.dptr_, dshape, s);
           out = Tensor<xpu, 4>(workspace.dptr_ + data_size, dshape, s);
         }
       }
       if (!std::is_same<DType, real_t>::value) {
         Kernel<identity_with_cast, xpu>::Launch(
-          s, data.shape_.Size(), data.dptr_, in_data[syncbatchnorm::kData].dptr<DType>());
+          s, data.shape_.Size(), data.dptr_, in_data[sync_inplace_abn::kData].dptr<DType>());
       }
-      Tensor<xpu, 1> slope = in_data[syncbatchnorm::kGamma].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> bias = in_data[syncbatchnorm::kBeta].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> moving_mean = aux_states[syncbatchnorm::kMovingMean].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> moving_var = aux_states[syncbatchnorm::kMovingVar].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> slope = in_data[sync_inplace_abn::kGamma].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> bias = in_data[sync_inplace_abn::kBeta].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> moving_mean = aux_states[sync_inplace_abn::kMovingMean].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> moving_var = aux_states[sync_inplace_abn::kMovingVar].get<xpu, 1, real_t>(s);
   
       if (param_.fix_gamma) slope = 1.f;
   
@@ -325,10 +323,10 @@ class SyncBatchNorm : public Operator {
         Barrier *global_barrier = global_shared_barrier.Register(param_.key + "f", param_.ndev);
         int myRank = global_shared_rank.Register(param_.key + "f", param_.ndev);
         // get the mean and var
-        Tensor<xpu, 1> mean = out_data[syncbatchnorm::kMean].get<xpu, 1, real_t>(s);
-        Tensor<xpu, 1> var = out_data[syncbatchnorm::kVar].get<xpu, 1, real_t>(s);
-        CHECK(req[syncbatchnorm::kMean] == kNullOp || req[syncbatchnorm::kMean] == kWriteTo);
-        CHECK(req[syncbatchnorm::kVar] == kNullOp || req[syncbatchnorm::kVar] == kWriteTo);
+        Tensor<xpu, 1> mean = out_data[sync_inplace_abn::kMean].get<xpu, 1, real_t>(s);
+        Tensor<xpu, 1> var = out_data[sync_inplace_abn::kVar].get<xpu, 1, real_t>(s);
+        CHECK(req[sync_inplace_abn::kMean] == kNullOp || req[sync_inplace_abn::kMean] == kWriteTo);
+        CHECK(req[sync_inplace_abn::kVar] == kNullOp || req[sync_inplace_abn::kVar] == kWriteTo);
         // E(x) and E(x^2)
         mean = scale * sumall_except_dim<1>(data);
         var = scale * sumall_except_dim<1>(F<mshadow_op::square>(data));
@@ -350,21 +348,26 @@ class SyncBatchNorm : public Operator {
         Copy(mean, mean_cpu, s);
         Copy(var, var_cpu, s);
   
-        var = var-F<mshadow_op::square>(mean);
-        Assign(out, req[syncbatchnorm::kOut], broadcast<1>(slope, out.shape_) *
+        var = var - F<square>(mean);
+        Assign(out, req[sync_inplace_abn::kOut], broadcast<1>(slope, out.shape_) *
                (data - broadcast<1>(mean, data.shape_)) /
-               F<mshadow_op::square_root>(broadcast<1>(var + param_.eps, data.shape_)) +
+               F<square_root>(broadcast<1>(var + param_.eps, data.shape_)) +
                broadcast<1>(bias, out.shape_));
       } else {
-        Assign(out, req[syncbatchnorm::kOut], broadcast<1>(slope /
-                                            F<mshadow_op::square_root>(moving_var + param_.eps),
+        Assign(out, req[sync_inplace_abn::kOut], broadcast<1>(slope /
+                                            F<square_root>(moving_var + param_.eps),
                                             data.shape_) * data +
                broadcast<1>(bias - (slope * moving_mean) /
-                            F<mshadow_op::square_root>(moving_var + param_.eps), data.shape_));
+                            F<square_root>(moving_var + param_.eps), data.shape_));
       }
+
+      MXNET_ASSIGN_REQ_SWITCH(req[sync_inplace_abn::kOut], Req, {
+        Kernel<op_with_req<xelu, Req>, xpu>::Launch(s, out.shape_.Size(), out.dptr_, out.dptr_, param_.relu_slope);
+      });
+      
       if (!std::is_same<DType, real_t>::value) {
         Kernel<identity_with_cast, xpu>::Launch(
-          s, out.shape_.Size(), out_data[syncbatchnorm::kOut].dptr<DType>(), out.dptr_);
+          s, out.shape_.Size(), out_data[sync_inplace_abn::kOut].dptr<DType>(), out.dptr_);
       }
     });
   }
@@ -386,23 +389,25 @@ class SyncBatchNorm : public Operator {
     CHECK_EQ(in_grad.size(), 3U);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 4> data, grad, grad_in;
+    Tensor<xpu, 4> out, grad, grad_in;
     Tensor<xpu, 1> workspace;
-    const size_t data_size = in_data[syncbatchnorm::kData].Size();
-    MSHADOW_TYPE_SWITCH(in_data[syncbatchnorm::kData].type_flag_, DType, {
+    const size_t data_size = out_data[sync_inplace_abn::kOut].Size();
+
+    MSHADOW_TYPE_SWITCH(out_data[sync_inplace_abn::kOut].type_flag_, DType, {
       const bool is_double = std::is_same<DType, double>::value;
       CHECK_EQ(is_double, false)
         << "Synchronized BatchNorm does not support double-precision floating number yet...";
       size_t total_workspace_size = 0;
 
-      Tensor<xpu, 1> mean = out_data[syncbatchnorm::kMean].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> var = out_data[syncbatchnorm::kVar].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> slope = in_data[syncbatchnorm::kGamma].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> gslope = in_grad[syncbatchnorm::kGamma].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> gbias = in_grad[syncbatchnorm::kBeta].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> mean = out_data[sync_inplace_abn::kMean].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> var = out_data[sync_inplace_abn::kVar].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> slope = in_data[sync_inplace_abn::kGamma].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> bias = in_data[sync_inplace_abn::kBeta].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> gslope = in_grad[sync_inplace_abn::kGamma].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> gbias = in_grad[sync_inplace_abn::kBeta].get<xpu, 1, real_t>(s);
       // update moving avg
-      Tensor<xpu, 1> moving_mean = aux_states[syncbatchnorm::kMovingMean].get<xpu, 1, real_t>(s);
-      Tensor<xpu, 1> moving_var = aux_states[syncbatchnorm::kMovingVar].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> moving_mean = aux_states[sync_inplace_abn::kMovingMean].get<xpu, 1, real_t>(s);
+      Tensor<xpu, 1> moving_var = aux_states[sync_inplace_abn::kMovingVar].get<xpu, 1, real_t>(s);
 
       if (ctx.is_train && !param_.use_global_stats) {
         total_workspace_size += 4 * mean.shape_[0];
@@ -411,62 +416,59 @@ class SyncBatchNorm : public Operator {
         total_workspace_size += 3 * data_size;
       }
 
-      workspace = ctx.requested[syncbatchnorm::kTempSpace].get_space<xpu, 1>(
+      workspace = ctx.requested[sync_inplace_abn::kTempSpace].get_space<xpu, 1>(
                     mshadow::Shape1(total_workspace_size), s);
       
-      const real_t scale = static_cast<real_t>(out_grad[syncbatchnorm::kOut].shape_[1]) /
-        static_cast<real_t>(out_grad[syncbatchnorm::kOut].shape_.Size());
-      if (in_data[syncbatchnorm::kData].ndim() == 2) {
-        Shape<4> dshape = Shape4(out_grad[syncbatchnorm::kOut].shape_[0],
-                                 out_grad[syncbatchnorm::kOut].shape_[1], 1, 1);        
-        if (!std::is_same<DType, real_t>::value) {
-          real_t* starting_ptr = (ctx.is_train && !param_.use_global_stats) ?
-                                       workspace.dptr_ + 4 * mean.shape_[0] :
-                                       workspace.dptr_;
-          data = Tensor<xpu, 4>(starting_ptr, dshape, s);
-          grad = Tensor<xpu, 4>(starting_ptr + data_size, dshape, s);
-          grad_in = Tensor<xpu, 4>(starting_ptr + 2 * data_size, dshape, s);
-        } else {
-          data = in_data[syncbatchnorm::kData].get_with_shape<xpu, 4, real_t>(dshape, s);
-          grad = out_grad[syncbatchnorm::kOut].get_with_shape<xpu, 4, real_t>(dshape, s);
-          grad_in = in_grad[syncbatchnorm::kData].get_with_shape<xpu, 4, real_t>(dshape, s);
-        }
+      const real_t scale = static_cast<real_t>(out_grad[sync_inplace_abn::kOut].shape_[1]) /
+        static_cast<real_t>(out_grad[sync_inplace_abn::kOut].shape_.Size()); // NHW normalizer
+
+      if (out_data[sync_inplace_abn::kOut].ndim() == 2) {
+        LOG(FATAL) << "Input layouts other than NCHW are not implemented.";
       } else {
-        Shape<4> dshape = Shape4(out_grad[syncbatchnorm::kOut].shape_[0],
-                                 out_grad[syncbatchnorm::kOut].shape_[1],
-                                 out_grad[syncbatchnorm::kOut].shape_[2],
-                                 out_grad[syncbatchnorm::kOut].shape_[3]);
+        Shape<4> dshape = Shape4(out_grad[sync_inplace_abn::kOut].shape_[0],
+                                 out_grad[sync_inplace_abn::kOut].shape_[1],
+                                 out_grad[sync_inplace_abn::kOut].shape_[2],
+                                 out_grad[sync_inplace_abn::kOut].shape_[3]);
         if (!std::is_same<DType, real_t>::value) {
           real_t* starting_ptr = (ctx.is_train && !param_.use_global_stats) ?
                                        workspace.dptr_ + 4 * mean.shape_[0] :
                                        workspace.dptr_;
-          data = Tensor<xpu, 4>(starting_ptr, dshape, s);
+          out = Tensor<xpu, 4>(starting_ptr, dshape, s);
           grad = Tensor<xpu, 4>(starting_ptr + data_size, dshape, s);
           grad_in = Tensor<xpu, 4>(starting_ptr + 2 * data_size, dshape, s);
         } else {
-          data = in_data[syncbatchnorm::kData].get<xpu, 4, real_t>(s);
-          grad = out_grad[syncbatchnorm::kOut].get<xpu, 4, real_t>(s);
-          grad_in = in_grad[syncbatchnorm::kData].get<xpu, 4, real_t>(s);
+          out = out_data[sync_inplace_abn::kOut].get<xpu, 4, real_t>(s);
+          grad = out_grad[sync_inplace_abn::kOut].get<xpu, 4, real_t>(s);
+          grad_in = in_grad[sync_inplace_abn::kData].get<xpu, 4, real_t>(s);
         }
       }
 
       if (!std::is_same<DType, real_t>::value) {
         Kernel<identity_with_cast, xpu>::Launch(
-          s, data.shape_.Size(), data.dptr_, in_data[syncbatchnorm::kData].dptr<DType>());
+          s, out.shape_.Size(), out.dptr_, out_data[sync_inplace_abn::kOut].dptr<DType>());
         Kernel<identity_with_cast, xpu>::Launch(
-          s, grad.shape_.Size(), grad.dptr_, out_grad[syncbatchnorm::kOut].dptr<DType>());
+          s, grad.shape_.Size(), grad.dptr_, out_grad[sync_inplace_abn::kOut].dptr<DType>());
       }
 
       if (param_.fix_gamma) slope = 1.f;
 
       if (ctx.is_train && !param_.use_global_stats) {
+        // grad = dL/dy
+        MXNET_ASSIGN_REQ_SWITCH(req[sync_inplace_abn::kOut], Req, {
+          Kernel<op_with_req<backward_grad_tuned<xelu_grad>, Req>, xpu>::Launch(
+            s, out.shape_.Size(), grad.dptr_, grad.dptr_, out.dptr_, param_.relu_slope);
+        }); 
+
+        // out = y
+        MXNET_ASSIGN_REQ_SWITCH(req[sync_inplace_abn::kOut], Req, {
+          Kernel<op_with_req<xelu, Req>, xpu>::Launch(s, out.shape_.Size(), out.dptr_, out.dptr_, 1.0f / param_.relu_slope);
+        });
+
         // get my rank
         Barrier *global_barrier = global_shared_barrier.Register(param_.key + "b", param_.ndev);
         int myRank = global_shared_rank.Register(param_.key + "b", param_.ndev);
 
         Shape<1> dshape = Shape1(mean.shape_[0]);
-        Tensor<xpu, 1> gmean = Tensor<xpu, 1>(workspace.dptr_, dshape, s);
-        Tensor<xpu, 1> gvar = Tensor<xpu, 1>(workspace.dptr_ + mean.shape_[0], dshape, s);
 
         moving_mean = moving_mean * param_.momentum + mean * (1 - param_.momentum);
         moving_var = moving_var * param_.momentum + var * (1 - param_.momentum);
@@ -474,7 +476,7 @@ class SyncBatchNorm : public Operator {
         Tensor<xpu, 1> sumGrad = Tensor<xpu, 1>(workspace.dptr_ + 2 * mean.shape_[0], dshape, s);
         Tensor<xpu, 1> sumProd = Tensor<xpu, 1>(workspace.dptr_ + 3 * mean.shape_[0], dshape, s);
         sumGrad = sumall_except_dim<1>(grad);
-        sumProd = sumall_except_dim<1>(grad * (data - broadcast<1>(mean, data.shape_)));
+        sumProd = sumall_except_dim<1>(grad * out);
         SharedND<Tensor<cpu, 1, real_t>> *sharedGrad =
           global_shared_grad.Register(param_.key, param_.ndev);
         SharedND<Tensor<cpu, 1, real_t>> *sharedProd =
@@ -493,57 +495,42 @@ class SyncBatchNorm : public Operator {
         Copy(sumGrad, grad_cpu, s);
         Copy(sumProd, prod_cpu, s);
 
-        gvar = -0.5f * sumProd * slope * F<mshadow_op::power>(var + param_.eps, -1.5f);
-        gmean = sumGrad * slope;
-        gmean *= -1.0f / F<mshadow_op::square_root>(var + param_.eps);
-        // NOTICE: sum (x_i - mu_B) = 0, so the second term for dl/dmu_B can be ignored
+        // gbias = dL/dbeta
+        Assign(gbias, req[sync_inplace_abn::kBeta], 1.0 * sumGrad); // 1.0 is a workaround
+        
+        // gslope = dL/dgamma
+        Assign(gslope, req[sync_inplace_abn::kGamma], (sumProd - bias * gbias) / slope);
 
-        // assign
-        if (!param_.fix_gamma) {
-          Assign(gslope, req[syncbatchnorm::kGamma], sumall_except_dim<1>(grad * (data - broadcast<1>(mean, data.shape_)) /
-                     F<mshadow_op::square_root>(broadcast<1>(var + param_.eps, data.shape_)))); // piggyback executor AllReduce for multi-dev summation
-        } else {
-          Assign(gslope, req[syncbatchnorm::kGamma], 0.0f);
+        // special treatment of gamma
+        if (param_.fix_gamma) {
+          Assign(gslope, req[sync_inplace_abn::kGamma], 0.0f);
         }
-        Assign(grad_in, req[syncbatchnorm::kData],
-               (grad * broadcast<1>(slope, data.shape_)) *
-                 broadcast<1>(1.0f / F<mshadow_op::square_root>(var + param_.eps), data.shape_) +
-               broadcast<1>(gvar, data.shape_) *
-                 scale * 2.0f * (data - broadcast<1>(mean, data.shape_)) +
-               broadcast<1>(gmean, data.shape_) * scale);
-        Assign(gbias, req[syncbatchnorm::kBeta], sumall_except_dim<1>(grad)); // piggyback executor AllReduce for multi-dev summation
+
+        Assign(grad_in, req[sync_inplace_abn::kData],
+                (grad - 
+                  broadcast<1>(scale * (gslope / slope), out.shape_) * out - 
+                  broadcast<1>(scale * (gbias - gslope * (bias / slope)), out.shape_)) * 
+                broadcast<1>(slope / F<square_root>(var + param_.eps), out.shape_));
       } else {
-        // use global statistics with freeze moving mean and var.
-        if (!param_.fix_gamma) {
-          Assign(gslope, req[syncbatchnorm::kGamma],
-                 sumall_except_dim<1>(
-                   grad * (data - broadcast<1>(moving_mean, data.shape_)) /
-                   F<mshadow_op::square_root>(broadcast<1>(moving_var + param_.eps, data.shape_))));
-        } else {
-          Assign(gslope, req[syncbatchnorm::kGamma], 0.0f);
-        }
-        Assign(gbias, req[syncbatchnorm::kBeta], sumall_except_dim<1>(grad));
-        Assign(grad_in, req[syncbatchnorm::kData], (grad * broadcast<1>(slope, data.shape_)) *
-               broadcast<1>(
-                 1.0f / F<mshadow_op::square_root>(moving_var + param_.eps), data.shape_));
+        LOG(FATAL) << "dose not support backward when use_global_stats = True.";
       }
       if (!std::is_same<DType, real_t>::value) {
         Kernel<identity_with_cast, xpu>::Launch(
-          s, grad_in.shape_.Size(), in_grad[syncbatchnorm::kData].dptr<DType>(), grad_in.dptr_);
+          s, grad_in.shape_.Size(), in_grad[sync_inplace_abn::kData].dptr<DType>(), grad_in.dptr_);
       }
     });
   } 
 
  private:
-  SyncBatchNormParam param_;
-};  // class SyncBatchNorm
+  SyncInplaceABNParam param_;
+};  // class SyncInplaceABN
 
 template<typename xpu>
-Operator *CreateOp(SyncBatchNormParam param, int dtype);
+Operator *CreateOp(SyncInplaceABNParam param, int dtype);
 
 
 #if DMLC_USE_CXX11
-class SyncBatchNormProp : public OperatorProperty {
+class SyncInplaceABNProp : public OperatorProperty {
  public:
   void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
     param_.Init(kwargs);
@@ -607,13 +594,13 @@ class SyncBatchNormProp : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new SyncBatchNormProp();
+    auto ptr = new SyncInplaceABNProp();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "_contrib_SyncBatchNorm";
+    return "_contrib_SyncInplaceABN";
   }
 
   std::vector<ResourceRequest> ForwardResource(
@@ -625,12 +612,27 @@ class SyncBatchNormProp : public OperatorProperty {
     const std::vector<int> &out_grad,
     const std::vector<int> &in_data,
     const std::vector<int> &out_data) const override {
-    return {out_grad[syncbatchnorm::kOut],
-            out_data[syncbatchnorm::kMean],
-            out_data[syncbatchnorm::kVar],
-            in_data[syncbatchnorm::kData],
-            in_data[syncbatchnorm::kGamma]
+    return {out_grad[sync_inplace_abn::kOut],
+            out_data[sync_inplace_abn::kOut],
+            out_data[sync_inplace_abn::kMean],
+            out_data[sync_inplace_abn::kVar], 
+            in_data[sync_inplace_abn::kBeta],
+            in_data[sync_inplace_abn::kGamma]
            };
+  }
+
+  std::vector<std::pair<int, void*> > ForwardInplaceOption(
+      const std::vector<int> &in_data,
+      const std::vector<void*> &out_data) const override {
+    return {{in_data[sync_inplace_abn::kData], out_data[sync_inplace_abn::kOut]}};
+  }
+
+  std::vector<std::pair<int, void*> > BackwardInplaceOption(
+    const std::vector<int> &out_grad,
+    const std::vector<int> &in_data,
+    const std::vector<int> &out_data,
+    const std::vector<void*> &in_grad) const override {
+    return {{out_grad[sync_inplace_abn::kOut], in_grad[sync_inplace_abn::kData]}};
   }
 
   std::vector<ResourceRequest> BackwardResource(
@@ -669,15 +671,15 @@ class SyncBatchNormProp : public OperatorProperty {
   Operator* CreateOperatorEx(Context ctx, std::vector<TShape> *in_shape,
       std::vector<int> *in_type) const override;
 
-  inline const SyncBatchNormParam& getParam() const {
+  inline const SyncInplaceABNParam& getParam() const {
     return param_;
   }
 
  private:
-  SyncBatchNormParam param_;
-};  // class SyncBatchNormProp
+  SyncInplaceABNParam param_;
+};  // class SyncInplaceABNProp
 
 #endif  // DMLC_USE_CXX11
 }  // namespace op
 }  // namespace mxnet
-#endif  // MXNET_OPERATOR_CONTRIB_SYNC_BATCH_NORM_INL_H_
+#endif  // MXNET_OPERATOR_CONTRIB_SYNC_INPLACE_ACTIVATION_BATCH_NORM_INL_H_

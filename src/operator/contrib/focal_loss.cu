@@ -18,20 +18,24 @@
  */
 
 /*!
- * Copyright (c) 2019 by Contributors
- * \file group_norm.cu
- * \brief Implements Group Normalization (https://arxiv.org/abs/1803.08494).
+ * \file focal_loss.cu
+ * \brief
+ * \author Chenxia Han
 */
-#include "./group_norm-inl.h"
+
+#include "./focal_loss-inl.h"
 
 namespace mxnet {
 namespace op {
 
-NNVM_REGISTER_OP(GroupNorm)
-.set_attr<FCompute>("FCompute<gpu>", GroupNormCompute<gpu>);
-
-NNVM_REGISTER_OP(_backward_GroupNorm)
-.set_attr<FCompute>("FCompute<gpu>", GroupNormGradCompute<gpu>);
+template<>
+Operator *CreateOp<gpu>(FocalLossParam param, int dtype) {
+  Operator *op = NULL;
+  MSHADOW_REAL_TYPE_SWITCH(dtype, DType, {
+    op = new FocalLossOp<gpu, DType>(param);
+  });
+  return op;
+}
 
 }  // namespace op
 }  // namespace mxnet

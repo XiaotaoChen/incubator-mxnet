@@ -18,19 +18,19 @@
  */
 
 /*!
- * \file proposal.cc
+ * \file generate_proposal.cc
  * \brief
- * \author Piotr Teterwak, Bing Xu, Jian Guo, Yuntao Chen
+ * \author Piotr Teterwak, Bing Xu, Jian Guo, Yuntao Chen, Yanghao Li
 */
 
-#include "./proposal-inl.h"
+#include "./generate_proposal-inl.h"
 
 //============================
 // Bounding Box Transform Utils
 //============================
 namespace mxnet {
 namespace op {
-namespace proposal_utils {
+namespace utils {
 
 // bbox prediction and clip to the image borders
 inline void BBoxTransformInv(const mshadow::Tensor<cpu, 3>& boxes,
@@ -170,16 +170,16 @@ inline void FilterBox(mshadow::Tensor<cpu, 3> *dets,
   }
 }
 
-}  // namespace proposal_utils
+}  // namespace utils
 }  // namespace op
 }  // namespace mxnet
 
 //=====================
-// NMS proposal_utils
+// SORT Utils
 //=====================
 namespace mxnet {
 namespace op {
-namespace proposal_utils {
+namespace utils {
 
 struct ReverseArgsortCompl {
   const float *val_;
@@ -225,60 +225,7 @@ inline void ReorderProposals(const mshadow::Tensor<cpu, 2>& prev_dets,
   }
 }
 
-// greedily keep the max detections (already sorted)
-inline void NonMaximumSuppression(const mshadow::Tensor<cpu, 2>& dets,
-                                  const float thresh,
-                                  const index_t post_nms_top_n,
-                                  mshadow::Tensor<cpu, 1> *area,
-                                  mshadow::Tensor<cpu, 1> *suppressed,
-                                  mshadow::Tensor<cpu, 1> *keep,
-                                  index_t *out_size) {
-  CHECK_EQ(dets.shape_[1], 5) << "dets: [x1, y1, x2, y2, score]";
-  CHECK_GT(dets.shape_[0], 0);
-  CHECK_EQ(dets.CheckContiguous(), true);
-  CHECK_EQ(area->CheckContiguous(), true);
-  CHECK_EQ(suppressed->CheckContiguous(), true);
-  CHECK_EQ(keep->CheckContiguous(), true);
-  // calculate area
-  for (index_t i = 0; i < dets.size(0); ++i) {
-    (*area)[i] = (dets[i][2] - dets[i][0] + 1) *
-                 (dets[i][3] - dets[i][1] + 1);
-  }
-
-  // calculate nms
-  *out_size = 0;
-  for (index_t i = 0; i < dets.size(0) && (*out_size) < post_nms_top_n; ++i) {
-    float ix1 = dets[i][0];
-    float iy1 = dets[i][1];
-    float ix2 = dets[i][2];
-    float iy2 = dets[i][3];
-    float iarea = (*area)[i];
-
-    if ((*suppressed)[i] > 0.0f) {
-      continue;
-    }
-
-    (*keep)[(*out_size)++] = i;
-    for (index_t j = i + 1; j < dets.size(0); j ++) {
-      if ((*suppressed)[j] > 0.0f) {
-        continue;
-      }
-      float xx1 = std::max(ix1, dets[j][0]);
-      float yy1 = std::max(iy1, dets[j][1]);
-      float xx2 = std::min(ix2, dets[j][2]);
-      float yy2 = std::min(iy2, dets[j][3]);
-      float w = std::max(0.0f, xx2 - xx1 + 1.0f);
-      float h = std::max(0.0f, yy2 - yy1 + 1.0f);
-      float inter = w * h;
-      float ovr = inter / (iarea + (*area)[j] - inter);
-      if (ovr > thresh) {
-        (*suppressed)[j] = 1.0f;
-      }
-    }
-  }
-}
-
-}  // namespace proposal_utils
+}  // namespace utils
 }  // namespace op
 }  // namespace mxnet
 
@@ -287,9 +234,9 @@ namespace mxnet {
 namespace op {
 
 template<typename xpu>
-class ProposalOp : public Operator{
+class GenProposalOp : public Operator{
  public:
-  explicit ProposalOp(ProposalParam param) {
+  explicit GenProposalOp(GenProposalParam param) {
     this->param_ = param;
   }
 
@@ -300,10 +247,10 @@ class ProposalOp : public Operator{
                        const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 3);
-    CHECK_EQ(out_data.size(), 2);
-    CHECK_GT(req.size(), 1);
-    CHECK_EQ(req[proposal::kOut], kWriteTo);
+    CHECK_EQ(in_data.size(), 4);
+    CHECK_EQ(out_data.size(), 1);
+    CHECK_EQ(req.size(), 1);
+    CHECK_EQ(req[gen_proposal::kOut], kWriteTo);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
@@ -313,12 +260,12 @@ class ProposalOp : public Operator{
 
     // real_t* foreground_score_ptr = in_data[proposal::kClsProb].dptr<real_t>()
     //                                 + fg_scores_shape.Size();
-    Tensor<xpu, 4> scores = in_data[proposal::kClsProb].get<cpu, 4, real_t>(s);
-    Tensor<cpu, 4> bbox_deltas = in_data[proposal::kBBoxPred].get<cpu, 4, real_t>(s);
-    Tensor<cpu, 2> im_info = in_data[proposal::kImInfo].get<cpu, 2, real_t>(s);
+    Tensor<xpu, 4> scores = in_data[gen_proposal::kClsProb].get<cpu, 4, real_t>(s);
+    Tensor<cpu, 4> bbox_deltas = in_data[gen_proposal::kBBoxPred].get<cpu, 4, real_t>(s);
+    Tensor<cpu, 2> im_info = in_data[gen_proposal::kImInfo].get<cpu, 2, real_t>(s);
+    Tensor<cpu, 2> anchors = in_data[gen_proposal::kAnchor].get<cpu, 2, real_t>(s);
 
-    Tensor<cpu, 3> out = out_data[proposal::kOut].get<cpu, 3, real_t>(s);
-    Tensor<cpu, 3> out_score = out_data[proposal::kScore].get<cpu, 3, real_t>(s);
+    Tensor<cpu, 3> out = out_data[gen_proposal::kOut].get<cpu, 3, real_t>(s);
 
     int nbatch = scores.size(0);
     int num_anchors = scores.size(1) / 2;
@@ -327,10 +274,9 @@ class ProposalOp : public Operator{
     int count = num_anchors * height * width;
     int rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;
     rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
-    int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
 
-    int workspace_size = nbatch * (count * 5 + 2 * count + rpn_pre_nms_top_n * 5 + 3 * rpn_pre_nms_top_n);
-    Tensor<cpu, 1> workspace = ctx.requested[proposal::kTempSpace].get_space<cpu>(
+    int workspace_size = nbatch * (count * 5 + 2 * count + rpn_pre_nms_top_n * 5);
+    Tensor<cpu, 1> workspace = ctx.requested[gen_proposal::kTempSpace].get_space<cpu>(
       Shape1(workspace_size), s);
     int start = 0;
     Tensor<cpu, 3> workspace_proposals(workspace.dptr_ + start, Shape3(nbatch, count, 5));
@@ -340,25 +286,8 @@ class ProposalOp : public Operator{
     Tensor<cpu, 3> workspace_ordered_proposals(workspace.dptr_ + start,
                                                Shape3(nbatch, rpn_pre_nms_top_n, 5));
     start += nbatch * rpn_pre_nms_top_n * 5;
-    Tensor<cpu, 3> workspace_nms(workspace.dptr_ + start, Shape3(3, nbatch, rpn_pre_nms_top_n));
-    start += nbatch * 3 * rpn_pre_nms_top_n;
     CHECK_EQ(workspace_size, start) << workspace_size << " " << start << std::endl;
 
-    // Generate anchors
-    std::vector<float> base_anchor(4);
-    base_anchor[0] = 0.0;
-    base_anchor[1] = 0.0;
-    base_anchor[2] = param_.feature_stride - 1.0;
-    base_anchor[3] = param_.feature_stride - 1.0;
-    CHECK_EQ(num_anchors, param_.ratios.info.size() * param_.scales.info.size());
-    std::vector<float> anchors;
-    proposal_utils::GenerateAnchors(base_anchor,
-                                    param_.ratios.info,
-                                    param_.scales.info,
-                                    &anchors);
-    for(int n = 0; n < nbatch; n++) {
-      std::memcpy(workspace_proposals.dptr_ + n * 5 * count, &anchors[0], sizeof(float) * anchors.size());
-    }
 
     // Enumerate all shifted anchors
     for (index_t n = 0; n < nbatch; ++n) {
@@ -366,10 +295,10 @@ class ProposalOp : public Operator{
         for (index_t j = 0; j < height; ++j) {
           for (index_t k = 0; k < width; ++k) {
             index_t index = j * (width * num_anchors) + k * (num_anchors) + i;
-            workspace_proposals[n][index][0] = workspace_proposals[n][i][0] + k * param_.feature_stride;
-            workspace_proposals[n][index][1] = workspace_proposals[n][i][1] + j * param_.feature_stride;
-            workspace_proposals[n][index][2] = workspace_proposals[n][i][2] + k * param_.feature_stride;
-            workspace_proposals[n][index][3] = workspace_proposals[n][i][3] + j * param_.feature_stride;
+            workspace_proposals[n][index][0] = anchors[index][0];
+            workspace_proposals[n][index][1] = anchors[index][1];
+            workspace_proposals[n][index][2] = anchors[index][2];
+            workspace_proposals[n][index][3] = anchors[index][3];
             workspace_proposals[n][index][4] = scores[n][i + width * height * num_anchors][j][k];
           }
         }
@@ -377,73 +306,42 @@ class ProposalOp : public Operator{
     }
 
     // prevent padded predictions
-
     if (param_.iou_loss) {
-      proposal_utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info, param_.feature_stride,
-                                      &(workspace_proposals));
+      utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info, param_.feature_stride,
+                             &(workspace_proposals));
     } else {
-      proposal_utils::BBoxTransformInv(workspace_proposals, bbox_deltas,im_info, param_.feature_stride,
-                                       &(workspace_proposals));
+      utils::BBoxTransformInv(workspace_proposals, bbox_deltas, im_info, param_.feature_stride,
+                              &(workspace_proposals));
     }
-    proposal_utils::FilterBox(&workspace_proposals, param_.rpn_min_size, im_info);
+    utils::FilterBox(&workspace_proposals, param_.rpn_min_size, im_info);
 
     Tensor<cpu, 2> score = workspace_pre_nms[0];
     Tensor<cpu, 2> order = workspace_pre_nms[1];
 
-    proposal_utils::CopyScore(workspace_proposals,
-                              &score,
-                              &order);
-
-    Tensor<cpu, 2> area = workspace_nms[0];
-    Tensor<cpu, 2> suppressed = workspace_nms[1];
-    Tensor<cpu, 2> keep = workspace_nms[2];
+    utils::CopyScore(workspace_proposals,
+                     &score,
+                     &order);
 
     for(int n = 0; n < nbatch; n++) {
       Tensor<cpu, 1> cur_order = order[n];
-      Tensor<cpu, 1> cur_area = area[n];
-      Tensor<cpu, 1> cur_keep = keep[n];
-      Tensor<cpu, 1> cur_suppressed = suppressed[n];
       Tensor<cpu, 2> cur_workspace_ordered_proposals = workspace_ordered_proposals[n];
-      proposal_utils::ReverseArgsort(score[n],
-                                     &cur_order);
-      proposal_utils::ReorderProposals(workspace_proposals[n],
-                                       cur_order,
-                                       rpn_pre_nms_top_n,
-                                       &cur_workspace_ordered_proposals);
-      index_t out_size = 0;
-      suppressed = 0;  // surprised!
-
-      proposal_utils::NonMaximumSuppression(cur_workspace_ordered_proposals,
-                                            param_.threshold,
-                                            rpn_post_nms_top_n,
-                                            &cur_area,
-                                            &cur_suppressed,
-                                            &cur_keep,
-                                            &out_size);
+      utils::ReverseArgsort(score[n],
+                            &cur_order);
+      utils::ReorderProposals(workspace_proposals[n],
+                              cur_order,
+                              rpn_pre_nms_top_n,
+                              &cur_workspace_ordered_proposals);
 
       // fill in output rois
       for (index_t i = 0; i < out.size(1); ++i) {
-        if (i < out_size) {
-          index_t index = cur_keep[i];
-          for (index_t j = 0; j < 4; ++j) {
-            out[n][i][j] =  cur_workspace_ordered_proposals[index][j];
+        if (i < rpn_pre_nms_top_n) {
+          for (index_t j = 0; j < 5; ++j) {
+            out[n][i][j] =  cur_workspace_ordered_proposals[i][j];
           }
         } else {
-          index_t index = cur_keep[i % out_size];
-          for (index_t j = 0; j < 4; ++j) {
-            out[n][i][j] = cur_workspace_ordered_proposals[index][j];
+          for (index_t j = 0; j < 5; ++j) {
+            out[n][i][j] = 0;
           }
-        }
-      }
-
-      // fill in output score
-      for (index_t i = 0; i < out_score.size(1); i++) {
-        if (i < out_size) {
-          index_t index = cur_keep[i];
-          out_score[n][i][0] = cur_workspace_ordered_proposals[index][4];
-        } else {
-          index_t index = cur_keep[i % out_size];
-          out_score[n][i][0] = cur_workspace_ordered_proposals[index][4];
         }
       }
     }
@@ -458,40 +356,43 @@ class ProposalOp : public Operator{
                         const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_grad.size(), 3);
+    CHECK_EQ(in_grad.size(), 4);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 4> gbbox = in_grad[proposal::kBBoxPred].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 2> ginfo = in_grad[proposal::kImInfo].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 4> gscores = in_grad[gen_proposal::kClsProb].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> gbbox = in_grad[gen_proposal::kBBoxPred].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 2> ginfo = in_grad[gen_proposal::kImInfo].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 2> ganchors = in_grad[gen_proposal::kAnchor].get<xpu, 2, real_t>(s);
 
     // can not assume the grad would be zero
-    Assign(gscores, req[proposal::kClsProb], 0);
-    Assign(gbbox, req[proposal::kBBoxPred], 0);
-    Assign(ginfo, req[proposal::kImInfo], 0);
+    Assign(gscores, req[gen_proposal::kClsProb], 0);
+    Assign(gbbox, req[gen_proposal::kBBoxPred], 0);
+    Assign(ginfo, req[gen_proposal::kImInfo], 0);
+    Assign(ganchors, req[gen_proposal::kAnchor], 0);
   }
 
  private:
-  ProposalParam param_;
-};  // class ProposalOp
+  GenProposalParam param_;
+};  // class GenProposalOp
 
 template<>
-Operator *CreateOp<cpu>(ProposalParam param) {
-  return new ProposalOp<cpu>(param);
+Operator *CreateOp<cpu>(GenProposalParam param) {
+  return new GenProposalOp<cpu>(param);
 }
 
-Operator* ProposalProp::CreateOperator(Context ctx) const {
+Operator* GenProposalProp::CreateOperator(Context ctx) const {
   DO_BIND_DISPATCH(CreateOp, param_);
 }
 
-DMLC_REGISTER_PARAMETER(ProposalParam);
+DMLC_REGISTER_PARAMETER(GenProposalParam);
 
-MXNET_REGISTER_OP_PROPERTY(_contrib_Proposal, ProposalProp)
+MXNET_REGISTER_OP_PROPERTY(_contrib_GenProposal, GenProposalProp)
 .describe("Generate region proposals via RPN")
 .add_argument("cls_prob", "NDArray-or-Symbol", "Probability of how likely proposal is object.")
 .add_argument("bbox_pred", "NDArray-or-Symbol", "BBox Predicted deltas from anchors for proposals")
 .add_argument("im_info", "NDArray-or-Symbol", "Image size and scale.")
-.add_arguments(ProposalParam::__FIELDS__());
+.add_argument("anchors", "NDArray-or-Symbol", "Generated Anchors.")
+.add_arguments(GenProposalParam::__FIELDS__());
 
 }  // namespace op
 }  // namespace mxnet

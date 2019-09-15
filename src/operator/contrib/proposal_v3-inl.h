@@ -22,8 +22,8 @@
  * \brief Proposal Operator
  * \author Piotr Teterwak, Bing Xu, Jian Guo, Pengfei Chen, Yuntao Chen
 */
-#ifndef MXNET_OPERATOR_CONTRIB_PROPOSAL_INL_H_
-#define MXNET_OPERATOR_CONTRIB_PROPOSAL_INL_H_
+#ifndef MXNET_OPERATOR_CONTRIB_PROPOSAL_v3_INL_H_
+#define MXNET_OPERATOR_CONTRIB_PROPOSAL_v3_INL_H_
 
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
@@ -132,13 +132,13 @@ inline std::ostream &operator<<(std::ostream &os, const NumericalParam<VType> &p
 namespace mxnet {
 namespace op {
 
-namespace proposal {
+namespace proposal_v3 {
 enum ProposalOpInputs {kClsProb, kBBoxPred, kImInfo};
 enum ProposalOpOutputs {kOut, kScore};
 enum ProposalForwardResource {kTempSpace};
 }  // proposal
 
-struct ProposalParam : public dmlc::Parameter<ProposalParam> {
+struct ProposalParam_v3 : public dmlc::Parameter<ProposalParam_v3> {
   int rpn_pre_nms_top_n;
   int rpn_post_nms_top_n;
   float threshold;
@@ -151,7 +151,7 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
   bool is_train;
   uint64_t workspace;
 
-  DMLC_DECLARE_PARAMETER(ProposalParam) {
+  DMLC_DECLARE_PARAMETER(ProposalParam_v3) {
     float tmp[] = {0, 0, 0, 0};
     DMLC_DECLARE_FIELD(rpn_pre_nms_top_n).set_default(6000)
     .describe("Number of top scoring boxes to keep after applying NMS to RPN proposals");
@@ -183,10 +183,10 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
 };
 
 template<typename xpu>
-Operator *CreateOp(ProposalParam param);
+Operator *CreateOp(ProposalParam_v3 param);
 
 #if DMLC_USE_CXX11
-class ProposalProp : public OperatorProperty {
+class ProposalProp_v3 : public OperatorProperty {
  public:
   void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
     param_.Init(kwargs);
@@ -201,15 +201,15 @@ class ProposalProp : public OperatorProperty {
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
     CHECK_EQ(in_shape->size(), 3) << "Input:[cls_prob, bbox_pred, im_info]";
-    const TShape &dshape = in_shape->at(proposal::kClsProb);
+    const TShape &dshape = in_shape->at(proposal_v3::kClsProb);
     if (dshape.ndim() == 0) return false;
     Shape<4> bbox_pred_shape;
     bbox_pred_shape = Shape4(dshape[0], dshape[1] * 2, dshape[2], dshape[3]);
-    SHAPE_ASSIGN_CHECK(*in_shape, proposal::kBBoxPred,
+    SHAPE_ASSIGN_CHECK(*in_shape, proposal_v3::kBBoxPred,
                        bbox_pred_shape);
     Shape<2> im_info_shape;
     im_info_shape = Shape2(dshape[0], 3);
-    SHAPE_ASSIGN_CHECK(*in_shape, proposal::kImInfo, im_info_shape);
+    SHAPE_ASSIGN_CHECK(*in_shape, proposal_v3::kImInfo, im_info_shape);
     out_shape->clear();
     // output
     out_shape->push_back(Shape3(dshape[0], param_.rpn_post_nms_top_n, 4));
@@ -219,13 +219,13 @@ class ProposalProp : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new ProposalProp();
+    auto ptr = new ProposalProp_v3();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "_contrib_Proposal";
+    return "_contrib_Proposal_v3";
   }
 
   std::vector<ResourceRequest> ForwardResource(
@@ -263,7 +263,7 @@ class ProposalProp : public OperatorProperty {
   Operator* CreateOperator(Context ctx) const override;
 
  private:
-  ProposalParam param_;
+  ProposalParam_v3 param_;
 };  // class ProposalProp
 
 #endif  // DMLC_USE_CXX11
@@ -275,7 +275,7 @@ class ProposalProp : public OperatorProperty {
 //========================
 namespace mxnet {
 namespace op {
-namespace proposal_utils {
+namespace proposal_v3_utils {
 
 inline void _MakeAnchor(float w,
                         float h,
@@ -299,8 +299,8 @@ inline void _Transform(float scale,
   float y_ctr = base_anchor[1] + 0.5 * (h - 1.0f);
   float size = w * h;
   float size_ratios = std::floor(size / ratio);
-  float new_w = std::floor(std::sqrt(size_ratios) + 0.5f) * scale;
-  float new_h = std::floor((new_w / scale * ratio) + 0.5f) * scale;
+  float new_w = std::rintf(std::sqrt(size_ratios)) * scale;
+  float new_h = std::rintf((new_w / scale * ratio)) * scale;
 
   _MakeAnchor(new_w, new_h, x_ctr, y_ctr, out_anchors);
 }
@@ -321,4 +321,4 @@ inline void GenerateAnchors(const std::vector<float>& base_anchor,
 }  // namespace op
 }  // namespace mxnet
 
-#endif  //  MXNET_OPERATOR_CONTRIB_PROPOSAL_INL_H_
+#endif  //  MXNET_OPERATOR_CONTRIB_PROPOSAL_v3_INL_H_

@@ -18,23 +18,23 @@
  */
 /*!
  * Copyright (c) 2018 by Contributors
- * \file sync_batch_norm.cc
+ * \file sync_inplace_activation_batch_norm.cc
  * \brief Synchronized BatchNorm modified from BatchNormV1
- * \author Hang Zhang
+ * \author Yuntao Chen
 */
 
-#include "sync_batch_norm-inl.h"
+#include "sync_inplace_activation_batch_norm-inl.h"
 #include <nnvm/op_attr_types.h>
 
 namespace mxnet {
 namespace op {
 template<>
-Operator *CreateOp<cpu>(SyncBatchNormParam param, int dtype) {
-  return new SyncBatchNorm<cpu>(param);
+Operator *CreateOp<cpu>(SyncInplaceABNParam param, int dtype) {
+  return new SyncInplaceABN<cpu>(param);
 }
 
 // DO_BIND_DISPATCH comes from operator_common.h
-Operator *SyncBatchNormProp::CreateOperatorEx(Context ctx, std::vector<TShape> *in_shape,
+Operator *SyncInplaceABNProp::CreateOperatorEx(Context ctx, std::vector<TShape> *in_shape,
     std::vector<int> *in_type) const {
     std::vector<TShape> out_shape, aux_shape;
     std::vector<int> out_type, aux_type;
@@ -43,9 +43,9 @@ Operator *SyncBatchNormProp::CreateOperatorEx(Context ctx, std::vector<TShape> *
     DO_BIND_DISPATCH(CreateOp, param_, (*in_type)[0]);
 }
 
-DMLC_REGISTER_PARAMETER(SyncBatchNormParam);
+DMLC_REGISTER_PARAMETER(SyncInplaceABNParam);
 
-MXNET_REGISTER_OP_PROPERTY(_contrib_SyncBatchNorm, SyncBatchNormProp)
+MXNET_REGISTER_OP_PROPERTY(_contrib_SyncInplaceABN, SyncInplaceABNProp)
 .describe(R"code(Batch normalization.
 
 Normalizes a data batch by mean and variance, and applies a scale ``gamma`` as
@@ -100,9 +100,9 @@ Reference:
 .add_argument("beta", "NDArray-or-Symbol", "beta array")
 .add_argument("moving_mean", "NDArray-or-Symbol", "running mean of input")
 .add_argument("moving_var", "NDArray-or-Symbol", "running variance of input")
-.add_arguments(SyncBatchNormParam::__FIELDS__());
+.add_arguments(SyncInplaceABNParam::__FIELDS__());
 
-NNVM_REGISTER_OP(_contrib_SyncBatchNorm)
+NNVM_REGISTER_OP(_contrib_SyncInplaceABN)
 .set_attr<nnvm::FSetInputVarAttrOnCompose>("FSetInputVarAttrOnCompose",
     [](const nnvm::NodeAttrs& attrs, nnvm::NodePtr var, const int index) {
       if (var->attrs.dict.find("__init__") != var->attrs.dict.end()) return;

@@ -94,6 +94,7 @@ class Executor(object):
             if nm in nset:
                 raise ValueError('Duplicate names detected, %s' % str(names))
             nset.add(nm)
+        
         return dict(zip(names, ndarrays))
 
     def _get_outputs(self):

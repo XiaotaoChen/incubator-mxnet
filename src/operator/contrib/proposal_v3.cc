@@ -23,14 +23,14 @@
  * \author Piotr Teterwak, Bing Xu, Jian Guo, Yuntao Chen
 */
 
-#include "./proposal-inl.h"
+#include "./proposal_v3-inl.h"
 
 //============================
 // Bounding Box Transform Utils
 //============================
 namespace mxnet {
 namespace op {
-namespace proposal_utils {
+namespace proposal_v3_utils {
 
 // bbox prediction and clip to the image borders
 inline void BBoxTransformInv(const mshadow::Tensor<cpu, 3>& boxes,
@@ -179,7 +179,7 @@ inline void FilterBox(mshadow::Tensor<cpu, 3> *dets,
 //=====================
 namespace mxnet {
 namespace op {
-namespace proposal_utils {
+namespace proposal_v3_utils {
 
 struct ReverseArgsortCompl {
   const float *val_;
@@ -287,9 +287,9 @@ namespace mxnet {
 namespace op {
 
 template<typename xpu>
-class ProposalOp : public Operator{
+class ProposalOp_v3 : public Operator{
  public:
-  explicit ProposalOp(ProposalParam param) {
+  explicit ProposalOp_v3(ProposalParam_v3 param) {
     this->param_ = param;
   }
 
@@ -303,22 +303,22 @@ class ProposalOp : public Operator{
     CHECK_EQ(in_data.size(), 3);
     CHECK_EQ(out_data.size(), 2);
     CHECK_GT(req.size(), 1);
-    CHECK_EQ(req[proposal::kOut], kWriteTo);
+    CHECK_EQ(req[proposal_v3::kOut], kWriteTo);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
-    // Shape<3> fg_scores_shape = Shape3(in_data[proposal::kClsProb].shape_[1] / 2,
-    //                                   in_data[proposal::kClsProb].shape_[2],
-    //                                   in_data[proposal::kClsProb].shape_[3]);
+    // Shape<3> fg_scores_shape = Shape3(in_data[proposal_v3::kClsProb].shape_[1] / 2,
+    //                                   in_data[proposal_v3::kClsProb].shape_[2],
+    //                                   in_data[proposal_v3::kClsProb].shape_[3]);
 
-    // real_t* foreground_score_ptr = in_data[proposal::kClsProb].dptr<real_t>()
+    // real_t* foreground_score_ptr = in_data[proposal_v3::kClsProb].dptr<real_t>()
     //                                 + fg_scores_shape.Size();
-    Tensor<xpu, 4> scores = in_data[proposal::kClsProb].get<cpu, 4, real_t>(s);
-    Tensor<cpu, 4> bbox_deltas = in_data[proposal::kBBoxPred].get<cpu, 4, real_t>(s);
-    Tensor<cpu, 2> im_info = in_data[proposal::kImInfo].get<cpu, 2, real_t>(s);
+    Tensor<xpu, 4> scores = in_data[proposal_v3::kClsProb].get<cpu, 4, real_t>(s);
+    Tensor<cpu, 4> bbox_deltas = in_data[proposal_v3::kBBoxPred].get<cpu, 4, real_t>(s);
+    Tensor<cpu, 2> im_info = in_data[proposal_v3::kImInfo].get<cpu, 2, real_t>(s);
 
-    Tensor<cpu, 3> out = out_data[proposal::kOut].get<cpu, 3, real_t>(s);
-    Tensor<cpu, 3> out_score = out_data[proposal::kScore].get<cpu, 3, real_t>(s);
+    Tensor<cpu, 3> out = out_data[proposal_v3::kOut].get<cpu, 3, real_t>(s);
+    Tensor<cpu, 3> out_score = out_data[proposal_v3::kScore].get<cpu, 3, real_t>(s);
 
     int nbatch = scores.size(0);
     int num_anchors = scores.size(1) / 2;
@@ -330,7 +330,7 @@ class ProposalOp : public Operator{
     int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
 
     int workspace_size = nbatch * (count * 5 + 2 * count + rpn_pre_nms_top_n * 5 + 3 * rpn_pre_nms_top_n);
-    Tensor<cpu, 1> workspace = ctx.requested[proposal::kTempSpace].get_space<cpu>(
+    Tensor<cpu, 1> workspace = ctx.requested[proposal_v3::kTempSpace].get_space<cpu>(
       Shape1(workspace_size), s);
     int start = 0;
     Tensor<cpu, 3> workspace_proposals(workspace.dptr_ + start, Shape3(nbatch, count, 5));
@@ -352,7 +352,7 @@ class ProposalOp : public Operator{
     base_anchor[3] = param_.feature_stride - 1.0;
     CHECK_EQ(num_anchors, param_.ratios.info.size() * param_.scales.info.size());
     std::vector<float> anchors;
-    proposal_utils::GenerateAnchors(base_anchor,
+    proposal_v3_utils::GenerateAnchors(base_anchor,
                                     param_.ratios.info,
                                     param_.scales.info,
                                     &anchors);
@@ -379,18 +379,18 @@ class ProposalOp : public Operator{
     // prevent padded predictions
 
     if (param_.iou_loss) {
-      proposal_utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info, param_.feature_stride,
+      proposal_v3_utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info, param_.feature_stride,
                                       &(workspace_proposals));
     } else {
-      proposal_utils::BBoxTransformInv(workspace_proposals, bbox_deltas,im_info, param_.feature_stride,
+      proposal_v3_utils::BBoxTransformInv(workspace_proposals, bbox_deltas,im_info, param_.feature_stride,
                                        &(workspace_proposals));
     }
-    proposal_utils::FilterBox(&workspace_proposals, param_.rpn_min_size, im_info);
+    proposal_v3_utils::FilterBox(&workspace_proposals, param_.rpn_min_size, im_info);
 
     Tensor<cpu, 2> score = workspace_pre_nms[0];
     Tensor<cpu, 2> order = workspace_pre_nms[1];
 
-    proposal_utils::CopyScore(workspace_proposals,
+    proposal_v3_utils::CopyScore(workspace_proposals,
                               &score,
                               &order);
 
@@ -404,16 +404,16 @@ class ProposalOp : public Operator{
       Tensor<cpu, 1> cur_keep = keep[n];
       Tensor<cpu, 1> cur_suppressed = suppressed[n];
       Tensor<cpu, 2> cur_workspace_ordered_proposals = workspace_ordered_proposals[n];
-      proposal_utils::ReverseArgsort(score[n],
+      proposal_v3_utils::ReverseArgsort(score[n],
                                      &cur_order);
-      proposal_utils::ReorderProposals(workspace_proposals[n],
+      proposal_v3_utils::ReorderProposals(workspace_proposals[n],
                                        cur_order,
                                        rpn_pre_nms_top_n,
                                        &cur_workspace_ordered_proposals);
       index_t out_size = 0;
       suppressed = 0;  // surprised!
 
-      proposal_utils::NonMaximumSuppression(cur_workspace_ordered_proposals,
+      proposal_v3_utils::NonMaximumSuppression(cur_workspace_ordered_proposals,
                                             param_.threshold,
                                             rpn_post_nms_top_n,
                                             &cur_area,
@@ -461,37 +461,37 @@ class ProposalOp : public Operator{
     CHECK_EQ(in_grad.size(), 3);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 4> gbbox = in_grad[proposal::kBBoxPred].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 2> ginfo = in_grad[proposal::kImInfo].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 4> gscores = in_grad[proposal_v3::kClsProb].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> gbbox = in_grad[proposal_v3::kBBoxPred].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 2> ginfo = in_grad[proposal_v3::kImInfo].get<xpu, 2, real_t>(s);
 
     // can not assume the grad would be zero
-    Assign(gscores, req[proposal::kClsProb], 0);
-    Assign(gbbox, req[proposal::kBBoxPred], 0);
-    Assign(ginfo, req[proposal::kImInfo], 0);
+    Assign(gscores, req[proposal_v3::kClsProb], 0);
+    Assign(gbbox, req[proposal_v3::kBBoxPred], 0);
+    Assign(ginfo, req[proposal_v3::kImInfo], 0);
   }
 
  private:
-  ProposalParam param_;
-};  // class ProposalOp
+  ProposalParam_v3 param_;
+};  // class ProposalOp_v3
 
 template<>
-Operator *CreateOp<cpu>(ProposalParam param) {
-  return new ProposalOp<cpu>(param);
+Operator *CreateOp<cpu>(ProposalParam_v3 param) {
+  return new ProposalOp_v3<cpu>(param);
 }
 
-Operator* ProposalProp::CreateOperator(Context ctx) const {
+Operator* ProposalProp_v3::CreateOperator(Context ctx) const {
   DO_BIND_DISPATCH(CreateOp, param_);
 }
 
-DMLC_REGISTER_PARAMETER(ProposalParam);
+DMLC_REGISTER_PARAMETER(ProposalParam_v3);
 
-MXNET_REGISTER_OP_PROPERTY(_contrib_Proposal, ProposalProp)
+MXNET_REGISTER_OP_PROPERTY(_contrib_Proposal_v3, ProposalProp_v3)
 .describe("Generate region proposals via RPN")
 .add_argument("cls_prob", "NDArray-or-Symbol", "Probability of how likely proposal is object.")
 .add_argument("bbox_pred", "NDArray-or-Symbol", "BBox Predicted deltas from anchors for proposals")
 .add_argument("im_info", "NDArray-or-Symbol", "Image size and scale.")
-.add_arguments(ProposalParam::__FIELDS__());
+.add_arguments(ProposalParam_v3::__FIELDS__());
 
 }  // namespace op
 }  // namespace mxnet

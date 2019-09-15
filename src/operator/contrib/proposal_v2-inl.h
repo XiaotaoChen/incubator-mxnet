@@ -19,11 +19,11 @@
 
 /*!
  * \file proposal-inl.h
- * \brief Proposal Operator
- * \author Piotr Teterwak, Bing Xu, Jian Guo, Pengfei Chen, Yuntao Chen
+ * \brief Proposal Operator for SNIP
+ * \author Piotr Teterwak, Bing Xu, Jian Guo, Pengfei Chen, Yuntao Chen, Yanghao Li
 */
-#ifndef MXNET_OPERATOR_CONTRIB_PROPOSAL_INL_H_
-#define MXNET_OPERATOR_CONTRIB_PROPOSAL_INL_H_
+#ifndef MXNET_OPERATOR_CONTRIB_PROPOSAL_v2_INL_H_
+#define MXNET_OPERATOR_CONTRIB_PROPOSAL_v2_INL_H_
 
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
@@ -132,13 +132,13 @@ inline std::ostream &operator<<(std::ostream &os, const NumericalParam<VType> &p
 namespace mxnet {
 namespace op {
 
-namespace proposal {
-enum ProposalOpInputs {kClsProb, kBBoxPred, kImInfo};
+namespace proposal_v2 {
+enum ProposalOpInputs {kClsProb, kBBoxPred, kImInfo, kValidRanges};
 enum ProposalOpOutputs {kOut, kScore};
 enum ProposalForwardResource {kTempSpace};
 }  // proposal
 
-struct ProposalParam : public dmlc::Parameter<ProposalParam> {
+struct ProposalParam_v2 : public dmlc::Parameter<ProposalParam_v2> {
   int rpn_pre_nms_top_n;
   int rpn_post_nms_top_n;
   float threshold;
@@ -148,10 +148,10 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
   int feature_stride;
   bool output_score;
   bool iou_loss;
-  bool is_train;
   uint64_t workspace;
+  bool filter_scales;
 
-  DMLC_DECLARE_PARAMETER(ProposalParam) {
+  DMLC_DECLARE_PARAMETER(ProposalParam_v2) {
     float tmp[] = {0, 0, 0, 0};
     DMLC_DECLARE_FIELD(rpn_pre_nms_top_n).set_default(6000)
     .describe("Number of top scoring boxes to keep after applying NMS to RPN proposals");
@@ -175,18 +175,18 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
     .describe("Add score to outputs");
     DMLC_DECLARE_FIELD(iou_loss).set_default(false)
     .describe("Usage of IoU Loss");
-    DMLC_DECLARE_FIELD(is_train).set_default(false)
-    .describe("used to determine the sample strategy when the nms rois is less than rpn_post_nms_top_n");
     DMLC_DECLARE_FIELD(workspace).set_default(256)
     .describe("Workspace for proposal in MB, default to 256");
+    DMLC_DECLARE_FIELD(filter_scales).set_default(false)
+    .describe("Remove proposals outside valid scale ranges");
   }
 };
 
 template<typename xpu>
-Operator *CreateOp(ProposalParam param);
+Operator *CreateOp(ProposalParam_v2 param);
 
 #if DMLC_USE_CXX11
-class ProposalProp : public OperatorProperty {
+class ProposalProp_v2 : public OperatorProperty {
  public:
   void Init(const std::vector<std::pair<std::string, std::string> >& kwargs) override {
     param_.Init(kwargs);
@@ -200,16 +200,19 @@ class ProposalProp : public OperatorProperty {
                   std::vector<TShape> *out_shape,
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
-    CHECK_EQ(in_shape->size(), 3) << "Input:[cls_prob, bbox_pred, im_info]";
-    const TShape &dshape = in_shape->at(proposal::kClsProb);
+    CHECK_EQ(in_shape->size(), 4) << "Input:[cls_prob, bbox_pred, im_info, valid_ranges]";
+    const TShape &dshape = in_shape->at(proposal_v2::kClsProb);
     if (dshape.ndim() == 0) return false;
     Shape<4> bbox_pred_shape;
     bbox_pred_shape = Shape4(dshape[0], dshape[1] * 2, dshape[2], dshape[3]);
-    SHAPE_ASSIGN_CHECK(*in_shape, proposal::kBBoxPred,
+    SHAPE_ASSIGN_CHECK(*in_shape, proposal_v2::kBBoxPred,
                        bbox_pred_shape);
     Shape<2> im_info_shape;
     im_info_shape = Shape2(dshape[0], 3);
-    SHAPE_ASSIGN_CHECK(*in_shape, proposal::kImInfo, im_info_shape);
+    SHAPE_ASSIGN_CHECK(*in_shape, proposal_v2::kImInfo, im_info_shape);
+    Shape<2> valid_ranges_shape;
+    valid_ranges_shape = Shape2(dshape[0], 2);
+    SHAPE_ASSIGN_CHECK(*in_shape, proposal_v2::kValidRanges, valid_ranges_shape);
     out_shape->clear();
     // output
     out_shape->push_back(Shape3(dshape[0], param_.rpn_post_nms_top_n, 4));
@@ -219,13 +222,13 @@ class ProposalProp : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new ProposalProp();
+    auto ptr = new ProposalProp_v2();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "_contrib_Proposal";
+    return "_contrib_Proposal_v2";
   }
 
   std::vector<ResourceRequest> ForwardResource(
@@ -253,7 +256,7 @@ class ProposalProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListArguments() const override {
-    return {"cls_prob", "bbox_pred", "im_info"};
+    return {"cls_prob", "bbox_pred", "im_info", "valid_ranges"};
   }
 
   std::vector<std::string> ListOutputs() const override {
@@ -263,7 +266,7 @@ class ProposalProp : public OperatorProperty {
   Operator* CreateOperator(Context ctx) const override;
 
  private:
-  ProposalParam param_;
+  ProposalParam_v2 param_;
 };  // class ProposalProp
 
 #endif  // DMLC_USE_CXX11
@@ -275,7 +278,7 @@ class ProposalProp : public OperatorProperty {
 //========================
 namespace mxnet {
 namespace op {
-namespace proposal_utils {
+namespace proposal_v2_utils {
 
 inline void _MakeAnchor(float w,
                         float h,
@@ -317,8 +320,8 @@ inline void GenerateAnchors(const std::vector<float>& base_anchor,
   }
 }
 
-}  // namespace proposal_utils
+}  // namespace proposal_v2_utils
 }  // namespace op
 }  // namespace mxnet
 
-#endif  //  MXNET_OPERATOR_CONTRIB_PROPOSAL_INL_H_
+#endif  //  MXNET_OPERATOR_CONTRIB_PROPOSAL_V2_INL_H_

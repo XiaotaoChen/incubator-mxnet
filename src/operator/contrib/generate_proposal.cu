@@ -18,9 +18,9 @@
  */
 
 /*!
- * \file proposal.cu
+ * \file generate_proposal.cu
  * \brief Proposal Operator
- * \author Shaoqing Ren, Jian Guo, Pengfei Chen, Yuntao Chen
+ * \author Shaoqing Ren, Jian Guo, Pengfei Chen, Yuntao Chen, Yanghao Li
 */
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
@@ -43,7 +43,7 @@
 
 #include "../operator_common.h"
 #include "../mshadow_op.h"
-#include "./proposal-inl.h"
+#include "./generate_proposal-inl.h"
 
 #define DIVUP(m, n) ((m) / (n) + ((m) % (n) > 0))
 
@@ -66,8 +66,8 @@ __global__ void ProposalGridKernel(const int count,
                                    const int num_anchors,
                                    const int height,
                                    const int width,
-                                   const int feature_stride,
                                    const Dtype* scores,
+                                   const Dtype* anchors,
                                    Dtype* proposals) {
   for (int index = blockIdx.x * blockDim.x + threadIdx.x;
        index < count;
@@ -76,10 +76,10 @@ __global__ void ProposalGridKernel(const int count,
     int w = (index / num_anchors) % width;
     int h = index / num_anchors / width;
 
-    proposals[index * 5 + 0] = proposals[a * 5 + 0] + w * feature_stride;
-    proposals[index * 5 + 1] = proposals[a * 5 + 1] + h * feature_stride;
-    proposals[index * 5 + 2] = proposals[a * 5 + 2] + w * feature_stride;
-    proposals[index * 5 + 3] = proposals[a * 5 + 3] + h * feature_stride;
+    proposals[index * 5 + 0] = anchors[index * 4 + 0];
+    proposals[index * 5 + 1] = anchors[index * 4 + 1];
+    proposals[index * 5 + 2] = anchors[index * 4 + 2];
+    proposals[index * 5 + 3] = anchors[index * 4 + 3];
     proposals[index * 5 + 4] = scores[(a * height + h) * width + w];
   }
 }
@@ -250,151 +250,25 @@ __global__ void ReorderProposalsKernel(const int count,
   }
 }
 
-__device__ inline float devIoU(float const * const a, float const * const b) {
-  float left = max(a[0], b[0]), right = min(a[2], b[2]);
-  float top = max(a[1], b[1]), bottom = min(a[3], b[3]);
-  float width = max(right - left + 1, 0.f), height = max(bottom - top + 1, 0.f);
-  float interS = width * height;
-  float Sa = (a[2] - a[0] + 1) * (a[3] - a[1] + 1);
-  float Sb = (b[2] - b[0] + 1) * (b[3] - b[1] + 1);
-  return interS / (Sa + Sb - interS);
-}
-
-__global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
-                           const float *dev_boxes, uint64_t *dev_mask) {
-  const int threadsPerBlock = sizeof(uint64_t) * 8;
-  const int row_start = blockIdx.y;
-  const int col_start = blockIdx.x;
-
-  // if (row_start > col_start) return;
-
-  const int row_size =
-        min(n_boxes - row_start * threadsPerBlock, threadsPerBlock);
-  const int col_size =
-        min(n_boxes - col_start * threadsPerBlock, threadsPerBlock);
-
-  __shared__ float block_boxes[threadsPerBlock * 5];
-  if (threadIdx.x < col_size) {
-    block_boxes[threadIdx.x * 5 + 0] =
-        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 5 + 0];
-    block_boxes[threadIdx.x * 5 + 1] =
-        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 5 + 1];
-    block_boxes[threadIdx.x * 5 + 2] =
-        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 5 + 2];
-    block_boxes[threadIdx.x * 5 + 3] =
-        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 5 + 3];
-    block_boxes[threadIdx.x * 5 + 4] =
-        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 5 + 4];
-  }
-  __syncthreads();
-
-  if (threadIdx.x < row_size) {
-    const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
-    const float *cur_box = dev_boxes + cur_box_idx * 5;
-    int i = 0;
-    uint64_t t = 0;
-    int start = 0;
-    if (row_start == col_start) {
-      start = threadIdx.x + 1;
-    }
-    for (i = start; i < col_size; i++) {
-      if (devIoU(cur_box, block_boxes + i * 5) > nms_overlap_thresh) {
-        t |= 1ULL << i;
-      }
-    }
-    const int col_blocks = DIVUP(n_boxes, threadsPerBlock);
-    dev_mask[cur_box_idx * col_blocks + col_start] = t;
-  }
-}
-
-void _nms(const mshadow::Tensor<gpu, 2>& boxes,
-          const float nms_overlap_thresh,
-          int *keep,
-          int *num_out,
-          uint64_t *mask_dev,
-          uint64_t *mask_host) {
-  /*
-  @input  boxes: (pre_nms_top_n, 5)
-  @return keep
-  @return num_out
-  @tmp    mask_dev
-  @tmp    mask_host
-  */
-  const int threadsPerBlock = sizeof(uint64_t) * 8;
-  const int boxes_num = boxes.size(0);
-  const int boxes_dim = boxes.size(1);
-
-  float* boxes_dev = boxes.dptr_;
-
-  const int col_blocks = DIVUP(boxes_num, threadsPerBlock);
-
-  dim3 blocks(DIVUP(boxes_num, threadsPerBlock),
-              DIVUP(boxes_num, threadsPerBlock));
-  dim3 threads(threadsPerBlock);
-  nms_kernel<<<blocks, threads>>>(boxes_num,
-                                  nms_overlap_thresh,
-                                  boxes_dev,
-                                  mask_dev);
-  FRCNN_CUDA_CHECK(cudaPeekAtLastError());
-
-  // TODO: need to be rewritten
-  FRCNN_CUDA_CHECK(cudaMemcpy(mask_host,
-                              mask_dev,
-                              sizeof(uint64_t) * boxes_num * col_blocks,
-                              cudaMemcpyDeviceToHost));
-
-  std::vector<uint64_t> remv(col_blocks);
-  memset(&remv[0], 0, sizeof(uint64_t) * col_blocks);
-
-  int num_to_keep = 0;
-  for (int i = 0; i < boxes_num; i++) {
-    int nblock = i / threadsPerBlock;
-    int inblock = i % threadsPerBlock;
-
-    if (!(remv[nblock] & (1ULL << inblock))) {
-      keep[num_to_keep++] = i;
-      uint64_t *p = mask_host + i * col_blocks;
-      for (int j = nblock; j < col_blocks; j++) {
-        remv[j] |= p[j];
-      }
-    }
-  }
-  *num_out = num_to_keep;
-}
-
 // copy proposals to output
 // dets (top_n, 5); keep (top_n, ); out (top_n, )
 // count should be top_n (total anchors or proposals)
 template<typename Dtype>
 __global__ void PrepareOutput(const int count,
                               const Dtype* dets,
-                              const int* keep,
                               const int out_size,
-                              Dtype* out,
-                              Dtype* score,
-                              const bool is_train) {
+                              const int batchIdx,
+                              Dtype* out) {
   for (int index = blockIdx.x * blockDim.x + threadIdx.x;
        index < count;
        index += blockDim.x * gridDim.x) {
     if (index < out_size) {
-      int keep_i = keep[index];
-      for (int j = 0; j < 4; ++j) {
-        out[index * 4 + j] = dets[keep_i * 5 + j];
+      for (int j = 0; j < 5; ++j) {
+        out[index * 5 + j] = dets[index * 5 + j];
       }
-      score[index] = dets[keep_i * 5 + 4];
     } else {
-      int keep_i = keep[index % out_size];
       for (int j = 0; j < 4; ++j) {
-          if (is_train) {
-            out[index * 4 + j] = dets[keep_i * 5 + j];
-          } else {
-            out[index * 4 + j] = 0.0f;
-          }
-      }
-      if (is_train) {
-        score[index] = dets[keep_i * 5 + 4];
-      } else {
-        score[index] = 0;
+        out[index * 5 + j + 1] = 0.0f;
       }
     }
   }
@@ -408,9 +282,9 @@ namespace mxnet {
 namespace op {
 
 template<typename xpu>
-class ProposalGPUOp : public Operator{
+class GenProposalGPUOp : public Operator{
  public:
-  explicit ProposalGPUOp(ProposalParam param) {
+  explicit GenProposalGPUOp(GenProposalParam param) {
     this->param_ = param;
   }
 
@@ -423,22 +297,22 @@ class ProposalGPUOp : public Operator{
     using namespace mshadow::expr;
     using namespace mshadow::cuda;
 
-    CHECK_EQ(in_data.size(), 3);
-    CHECK_EQ(out_data.size(), 2);
-    CHECK_GT(req.size(), 1);
+    CHECK_EQ(in_data.size(), 4);
+    CHECK_EQ(out_data.size(), 1);
+    CHECK_EQ(req.size(), 1);
     // CHECK_EQ(req[proposal::kOut], kWriteTo);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
-    Tensor<xpu, 4> scores = in_data[proposal::kClsProb].get<xpu, 4, float>(s); // batch_idx, anchor_idx, height_idx, width_idx
-    Tensor<xpu, 4> bbox_deltas = in_data[proposal::kBBoxPred].get<xpu, 4, float>(s); // batch_idx, height_idx, width_idx, anchor_idx
-    Tensor<xpu, 2> im_info = in_data[proposal::kImInfo].get<xpu, 2, float>(s); // batch_idx, 3(height, width, scale)
+    Tensor<xpu, 4> scores = in_data[gen_proposal::kClsProb].get<xpu, 4, float>(s); // batch_idx, anchor_idx, height_idx, width_idx
+    Tensor<xpu, 4> bbox_deltas = in_data[gen_proposal::kBBoxPred].get<xpu, 4, float>(s); // batch_idx, height_idx, width_idx, anchor_idx
+    Tensor<xpu, 2> im_info = in_data[gen_proposal::kImInfo].get<xpu, 2, float>(s); // batch_idx, 3(height, width, scale)
+    Tensor<xpu, 2> anchors = in_data[gen_proposal::kAnchor].get<xpu, 2, float>(s); // height * width * anchor, 4
 
-    Tensor<xpu, 3> out = out_data[proposal::kOut].get<xpu, 3, float>(s); // batch_idx, rois_idx, 4(x1, y1, x2, y2), batch_idx is needed after flatten
-    Tensor<xpu, 3> out_score = out_data[proposal::kScore].get<xpu, 3, float>(s); // batch_idx, rois_idx, 1(score)
+    Tensor<xpu, 3> out = out_data[gen_proposal::kOut].get<xpu, 3, float>(s); // batch_idx, rois_idx, 5(batch_idx, x1, y1, x2, y2), batch_idx is needed after flatten
 
     uint64_t WORKSPACE_LIMIT = 1024 * 1024 * param_.workspace; // 256 MB should be sufficient
-    Tensor<xpu, 1, uint8_t> workspace = ctx.requested[proposal::kTempSpace].get_space_typed<xpu, 1, uint8_t>(Shape1(WORKSPACE_LIMIT), s);
+    Tensor<xpu, 1, uint8_t> workspace = ctx.requested[gen_proposal::kTempSpace].get_space_typed<xpu, 1, uint8_t>(Shape1(WORKSPACE_LIMIT), s);
     uint64_t allocated_bytes = 0ULL;
     uint64_t allocated_bytes_outside_loop = 0ULL;
 
@@ -450,23 +324,6 @@ class ProposalGPUOp : public Operator{
     // set to -1 for max
     int rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;
     rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
-    int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
-    if (!param_.is_train) {
-        rpn_post_nms_top_n = param_.rpn_post_nms_top_n;
-    }
-
-    // Generate first anchors based on base anchor
-    std::vector<float> base_anchor(4);
-    base_anchor[0] = 0.0;
-    base_anchor[1] = 0.0;
-    base_anchor[2] = param_.feature_stride - 1.0;
-    base_anchor[3] = param_.feature_stride - 1.0;
-    CHECK_EQ(num_anchors, param_.ratios.info.size() * param_.scales.info.size());
-    std::vector<float> anchors;
-    proposal_utils::GenerateAnchors(base_anchor,
-                           param_.ratios.info,
-                           param_.scales.info,
-                           &anchors);
 
     // Copy generated anchors to GPU
     Tensor<xpu, 3> proposals(reinterpret_cast<float *>(workspace.dptr_ + allocated_bytes), Shape3(nbatch, count, 5));
@@ -481,9 +338,9 @@ class ProposalGPUOp : public Operator{
                                 cudaMemcpyDeviceToHost)); // less than 64K
 
     
-    Shape<3> fg_scores_shape = Shape3(in_data[proposal::kClsProb].shape_[1] / 2,
-                                      in_data[proposal::kClsProb].shape_[2], 
-                                      in_data[proposal::kClsProb].shape_[3]);
+    Shape<3> fg_scores_shape = Shape3(in_data[gen_proposal::kClsProb].shape_[1] / 2,
+                                      in_data[gen_proposal::kClsProb].shape_[2],
+                                      in_data[gen_proposal::kClsProb].shape_[3]);
 
     allocated_bytes_outside_loop = allocated_bytes;
     /* copy anchors for all images in batch */
@@ -495,10 +352,6 @@ class ProposalGPUOp : public Operator{
       CHECK_GE(width, real_width) << width << " " << real_width << std::endl;
 
       float* batch_proposals = proposals.dptr_ + i * 5 * count;
-      FRCNN_CUDA_CHECK(cudaMemcpy(batch_proposals,
-                                  &anchors[0], 
-                                  sizeof(float) * anchors.size(),
-                                  cudaMemcpyHostToDevice)); // less than 64K
 
       /* get current batch foreground score */
       float* foreground_score_ptr = reinterpret_cast<float *>(scores.dptr_) + i * 2 * count + fg_scores_shape.Size();
@@ -509,8 +362,8 @@ class ProposalGPUOp : public Operator{
       dim3 dimBlock(kMaxThreadsPerBlock);
       CheckLaunchParam(dimGrid, dimBlock, "ProposalGrid");
       ProposalGridKernel<<<dimGrid, dimBlock>>>(
-        count, num_anchors, height, width, param_.feature_stride,
-        fg_scores.dptr_, batch_proposals);
+        count, num_anchors, height, width,
+        fg_scores.dptr_, anchors.dptr_, batch_proposals);
       FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
       /* transform anchors and bbox_deltas into bboxes */
@@ -567,45 +420,12 @@ class ProposalGPUOp : public Operator{
         rpn_pre_nms_top_n, batch_proposals, order.dptr_, ordered_proposals.dptr_);
       FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
-      /* perform nms */
-      std::vector<int> _keep(rpn_pre_nms_top_n);
-      int out_size = 0;
-      const int boxes_num = rpn_pre_nms_top_n;
-      const int col_blocks = DIVUP(boxes_num, sizeof(uint64_t) * 8);
-      // take special care when allocate memory of 8-byte alignment.
-      allocated_bytes += allocated_bytes % sizeof(uint64_t);
-      Tensor<xpu, 1, uint64_t> mask_tensor(reinterpret_cast<uint64_t *>(workspace.dptr_ + allocated_bytes), Shape1(boxes_num * col_blocks));
-      allocated_bytes += boxes_num * col_blocks * sizeof(uint64_t); 
-      CHECK_LT(allocated_bytes, WORKSPACE_LIMIT) << "Allocating more memory than workspace limit";   
-      // the following line does not need change since it the only place where requires host workspace
-      Tensor<cpu, 1, uint64_t> mask_host_tensor = ctx.requested[proposal::kTempSpace].get_host_space_typed<1, uint64_t>(Shape1(boxes_num * col_blocks));
-      uint64_t *mask_dev = mask_tensor.dptr_;
-      uint64_t *mask_host = mask_host_tensor.dptr_;
-      _nms(ordered_proposals,
-           param_.threshold,
-           &_keep[0],
-           &out_size,
-           mask_dev,
-           mask_host);
-
-      /* copy nms result to gpu */
-      Tensor<xpu, 1, int> keep(reinterpret_cast<int *>(workspace.dptr_ + allocated_bytes), Shape1(_keep.size()));
-      allocated_bytes += _keep.size() * sizeof(int);
-      CHECK_LT(allocated_bytes, WORKSPACE_LIMIT) << "Allocating more memory than workspace limit";
-      
-      FRCNN_CUDA_CHECK(cudaMemcpy(keep.dptr_, 
-                                  &_keep[0], 
-                                  sizeof(int) * _keep.size(),
-                                  cudaMemcpyHostToDevice)); // less than 64K
-
-      /* copy results after nms */
-      dimGrid.x = (rpn_post_nms_top_n + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
+      /* copy results to output */
+      dimGrid.x = (out.size(1) + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
       CheckLaunchParam(dimGrid, dimBlock, "PrepareOutput");
       PrepareOutput<<<dimGrid, dimBlock>>>(
-        rpn_post_nms_top_n, ordered_proposals.dptr_, keep.dptr_, out_size,
-        out.dptr_ + i * 4 * rpn_post_nms_top_n,
-        out_score.dptr_ + i * rpn_post_nms_top_n,
-        param_.is_train);
+        out.size(1), ordered_proposals.dptr_, rpn_pre_nms_top_n, i,
+        out.dptr_ + i * 5 * out.size(1));
       FRCNN_CUDA_CHECK(cudaPeekAtLastError());
       
       // recycle all bytes allocated within loop
@@ -622,26 +442,28 @@ class ProposalGPUOp : public Operator{
                         const std::vector<TBlob> &aux_states) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_grad.size(), 3);
+    CHECK_EQ(in_grad.size(), 4);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 4> gbbox = in_grad[proposal::kBBoxPred].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 2> ginfo = in_grad[proposal::kImInfo].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 4> gscores = in_grad[gen_proposal::kClsProb].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> gbbox = in_grad[gen_proposal::kBBoxPred].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 2> ginfo = in_grad[gen_proposal::kImInfo].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 2> ganchors = in_grad[gen_proposal::kAnchor].get<xpu, 2, real_t>(s);
 
     // can not assume the grad would be zero
-    Assign(gscores, req[proposal::kClsProb], 0);
-    Assign(gbbox, req[proposal::kBBoxPred], 0);
-    Assign(ginfo, req[proposal::kImInfo], 0);
+    Assign(gscores, req[gen_proposal::kClsProb], 0);
+    Assign(gbbox, req[gen_proposal::kBBoxPred], 0);
+    Assign(ginfo, req[gen_proposal::kImInfo], 0);
+    Assign(ganchors, req[gen_proposal::kAnchor], 0);
   }
 
  private:
-  ProposalParam param_;
-};  // class ProposalGPUOp
+  GenProposalParam param_;
+};  // class GenProposalGPUOp
 
 template<>
-Operator* CreateOp<gpu>(ProposalParam param) {
-  return new ProposalGPUOp<gpu>(param);
+Operator* CreateOp<gpu>(GenProposalParam param) {
+  return new GenProposalGPUOp<gpu>(param);
 }
 }  // namespace op
 }  // namespace mxnet

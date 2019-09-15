@@ -43,7 +43,7 @@
 
 #include "../operator_common.h"
 #include "../mshadow_op.h"
-#include "./proposal-inl.h"
+#include "./proposal_v3-inl.h"
 
 #define DIVUP(m, n) ((m) / (n) + ((m) % (n) > 0))
 
@@ -110,23 +110,33 @@ __global__ void BBoxPredKernel(const int count,
 
     float width = boxes[index * 5 + 2] - boxes[index * 5 + 0] + 1.0f;
     float height = boxes[index * 5 + 3] - boxes[index * 5 + 1] + 1.0f;
-    float ctr_x = boxes[index * 5 + 0] + 0.5f * (width - 1.0f);
-    float ctr_y = boxes[index * 5 + 1] + 0.5f * (height - 1.0f);
+    // float ctr_x = boxes[index * 5 + 0] + 0.5f * (width - 1.0f);
+    // float ctr_y = boxes[index * 5 + 1] + 0.5f * (height - 1.0f);
+    float ctr_x = boxes[index * 5 + 0] + 0.5f * width;
+    float ctr_y = boxes[index * 5 + 1] + 0.5f * height;
 
     float dx = deltas[((a * 4) * feat_height + h) * feat_width + w];
     float dy = deltas[((a * 4 + 1) * feat_height + h) * feat_width + w];
     float dw = deltas[((a * 4 + 2) * feat_height + h) * feat_width + w];
     float dh = deltas[((a * 4 + 3) * feat_height + h) * feat_width + w];
 
+    dw = min(dw, 4.135166556742356);
+    dh = min(dh, 4.135166556742356);
+
     float pred_ctr_x = dx * width + ctr_x;
     float pred_ctr_y = dy * height + ctr_y;
     float pred_w = exp(dw) * width;
     float pred_h = exp(dh) * height;
 
-    float pred_x1 = pred_ctr_x - 0.5f * (pred_w - 1.0f);
-    float pred_y1 = pred_ctr_y - 0.5f * (pred_h - 1.0f);
-    float pred_x2 = pred_ctr_x + 0.5f * (pred_w - 1.0f);
-    float pred_y2 = pred_ctr_y + 0.5f * (pred_h - 1.0f);
+    // float pred_x1 = pred_ctr_x - 0.5f * (pred_w - 1.0f);
+    // float pred_y1 = pred_ctr_y - 0.5f * (pred_h - 1.0f);
+    // float pred_x2 = pred_ctr_x + 0.5f * (pred_w - 1.0f);
+    // float pred_y2 = pred_ctr_y + 0.5f * (pred_h - 1.0f);
+
+    float pred_x1 = pred_ctr_x - 0.5f * pred_w;
+    float pred_y1 = pred_ctr_y - 0.5f * pred_h;
+    float pred_x2 = pred_ctr_x + 0.5f * pred_w - 1.0f;
+    float pred_y2 = pred_ctr_y + 0.5f * pred_h - 1.0f;
 
     pred_x1 = max(min(pred_x1, im_width - 1.0f), 0.0f);
     pred_y1 = max(min(pred_y1, im_height - 1.0f), 0.0f);
@@ -138,9 +148,9 @@ __global__ void BBoxPredKernel(const int count,
     out_pred_boxes[index * 5 + 2] = pred_x2;
     out_pred_boxes[index * 5 + 3] = pred_y2;
 
-    if (h >= real_height || w >= real_width) {
-      out_pred_boxes[index * 5 + 4] = -1.0f;
-    }
+    // if (h >= real_height || w >= real_width) {
+    //   out_pred_boxes[index * 5 + 4] = -1.0f;
+    // }
   }
 }
 
@@ -200,17 +210,25 @@ __global__ void IoUPredKernel(const int count,
 template<typename Dtype>
 __global__ void FilterBoxKernel(const int count,
                                 const float min_size,
+                                const float im_h,
+                                const float im_w,
+                                const float scale,
                                 Dtype* dets) {
   for (int index = blockIdx.x * blockDim.x + threadIdx.x;
        index < count;
        index += blockDim.x * gridDim.x) {
-    float iw = dets[index * 5 + 2] - dets[index * 5 + 0] + 1.0f;
-    float ih = dets[index * 5 + 3] - dets[index * 5 + 1] + 1.0f;
-    if (iw < min_size || ih < min_size) {
-      dets[index * 5 + 0] -= min_size / 2;
-      dets[index * 5 + 1] -= min_size / 2;
-      dets[index * 5 + 2] += min_size / 2;
-      dets[index * 5 + 3] += min_size / 2;
+    float ws_orig_scale = (dets[index * 5 + 2] - dets[index * 5 + 0]) / scale + 1.0f;
+    float hs_orig_scale = (dets[index * 5 + 3] - dets[index * 5 + 1]) / scale + 1.0f;
+    float min_size_max = max(min_size, 1.0f);
+    float ws = dets[index * 5 + 2] - dets[index * 5 + 0] + 1.0f;
+    float hs = dets[index * 5 + 3] - dets[index * 5 + 1] + 1.0f;
+    float x_ctr = dets[index * 5 + 0] + ws / 2.0f;
+    float y_ctr = dets[index * 5 + 1] + hs / 2.0f;
+    if (ws_orig_scale < min_size_max || hs_orig_scale < min_size_max || x_ctr >= im_w || y_ctr >= im_h) {
+      dets[index * 5 + 0] -= min_size_max / 2;
+      dets[index * 5 + 1] -= min_size_max / 2;
+      dets[index * 5 + 2] += min_size_max / 2;
+      dets[index * 5 + 3] += min_size_max / 2;
       dets[index * 5 + 4] = -1.0f;
     }
   }
@@ -298,7 +316,7 @@ __global__ void nms_kernel(const int n_boxes, const float nms_overlap_thresh,
       start = threadIdx.x + 1;
     }
     for (i = start; i < col_size; i++) {
-      if (devIoU(cur_box, block_boxes + i * 5) > nms_overlap_thresh) {
+      if (devIoU(cur_box, block_boxes + i * 5) >= nms_overlap_thresh) {
         t |= 1ULL << i;
       }
     }
@@ -408,9 +426,9 @@ namespace mxnet {
 namespace op {
 
 template<typename xpu>
-class ProposalGPUOp : public Operator{
+class ProposalGPUOp_v3 : public Operator{
  public:
-  explicit ProposalGPUOp(ProposalParam param) {
+  explicit ProposalGPUOp_v3(ProposalParam_v3 param) {
     this->param_ = param;
   }
 
@@ -426,19 +444,19 @@ class ProposalGPUOp : public Operator{
     CHECK_EQ(in_data.size(), 3);
     CHECK_EQ(out_data.size(), 2);
     CHECK_GT(req.size(), 1);
-    // CHECK_EQ(req[proposal::kOut], kWriteTo);
+    // CHECK_EQ(req[proposal_v3::kOut], kWriteTo);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
-    Tensor<xpu, 4> scores = in_data[proposal::kClsProb].get<xpu, 4, float>(s); // batch_idx, anchor_idx, height_idx, width_idx
-    Tensor<xpu, 4> bbox_deltas = in_data[proposal::kBBoxPred].get<xpu, 4, float>(s); // batch_idx, height_idx, width_idx, anchor_idx
-    Tensor<xpu, 2> im_info = in_data[proposal::kImInfo].get<xpu, 2, float>(s); // batch_idx, 3(height, width, scale)
+    Tensor<xpu, 4> scores = in_data[proposal_v3::kClsProb].get<xpu, 4, float>(s); // batch_idx, anchor_idx, height_idx, width_idx
+    Tensor<xpu, 4> bbox_deltas = in_data[proposal_v3::kBBoxPred].get<xpu, 4, float>(s); // batch_idx, height_idx, width_idx, anchor_idx
+    Tensor<xpu, 2> im_info = in_data[proposal_v3::kImInfo].get<xpu, 2, float>(s); // batch_idx, 3(height, width, scale)
 
-    Tensor<xpu, 3> out = out_data[proposal::kOut].get<xpu, 3, float>(s); // batch_idx, rois_idx, 4(x1, y1, x2, y2), batch_idx is needed after flatten
-    Tensor<xpu, 3> out_score = out_data[proposal::kScore].get<xpu, 3, float>(s); // batch_idx, rois_idx, 1(score)
+    Tensor<xpu, 3> out = out_data[proposal_v3::kOut].get<xpu, 3, float>(s); // batch_idx, rois_idx, 4(x1, y1, x2, y2), batch_idx is needed after flatten
+    Tensor<xpu, 3> out_score = out_data[proposal_v3::kScore].get<xpu, 3, float>(s); // batch_idx, rois_idx, 1(score)
 
     uint64_t WORKSPACE_LIMIT = 1024 * 1024 * param_.workspace; // 256 MB should be sufficient
-    Tensor<xpu, 1, uint8_t> workspace = ctx.requested[proposal::kTempSpace].get_space_typed<xpu, 1, uint8_t>(Shape1(WORKSPACE_LIMIT), s);
+    Tensor<xpu, 1, uint8_t> workspace = ctx.requested[proposal_v3::kTempSpace].get_space_typed<xpu, 1, uint8_t>(Shape1(WORKSPACE_LIMIT), s);
     uint64_t allocated_bytes = 0ULL;
     uint64_t allocated_bytes_outside_loop = 0ULL;
 
@@ -463,7 +481,7 @@ class ProposalGPUOp : public Operator{
     base_anchor[3] = param_.feature_stride - 1.0;
     CHECK_EQ(num_anchors, param_.ratios.info.size() * param_.scales.info.size());
     std::vector<float> anchors;
-    proposal_utils::GenerateAnchors(base_anchor,
+    proposal_v3_utils::GenerateAnchors(base_anchor,
                            param_.ratios.info,
                            param_.scales.info,
                            &anchors);
@@ -481,9 +499,9 @@ class ProposalGPUOp : public Operator{
                                 cudaMemcpyDeviceToHost)); // less than 64K
 
     
-    Shape<3> fg_scores_shape = Shape3(in_data[proposal::kClsProb].shape_[1] / 2,
-                                      in_data[proposal::kClsProb].shape_[2], 
-                                      in_data[proposal::kClsProb].shape_[3]);
+    Shape<3> fg_scores_shape = Shape3(in_data[proposal_v3::kClsProb].shape_[1] / 2,
+                                      in_data[proposal_v3::kClsProb].shape_[2], 
+                                      in_data[proposal_v3::kClsProb].shape_[3]);
 
     allocated_bytes_outside_loop = allocated_bytes;
     /* copy anchors for all images in batch */
@@ -528,12 +546,6 @@ class ProposalGPUOp : public Operator{
       }
       FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
-      /* filter boxes with less than rpn_min_size */
-      CheckLaunchParam(dimGrid, dimBlock, "FilterBox");
-      FilterBoxKernel<<<dimGrid, dimBlock>>>(
-        count, param_.rpn_min_size * cpu_im_info[i * 3 + 2], batch_proposals);
-      FRCNN_CUDA_CHECK(cudaPeekAtLastError());
-
       /* copy score to a continuous memory */
       Tensor<xpu, 1> score(reinterpret_cast<float *>(workspace.dptr_ + allocated_bytes), Shape1(count));
       allocated_bytes += count * sizeof(float);
@@ -567,6 +579,18 @@ class ProposalGPUOp : public Operator{
         rpn_pre_nms_top_n, batch_proposals, order.dptr_, ordered_proposals.dptr_);
       FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
+      /* filter boxes with less than rpn_min_size */
+      CheckLaunchParam(dimGrid, dimBlock, "FilterBox");
+      FilterBoxKernel<<<dimGrid, dimBlock>>>(
+        rpn_pre_nms_top_n, param_.rpn_min_size, cpu_im_info[i * 3 + 0], cpu_im_info[i * 3 + 1], cpu_im_info[i * 3 + 2], ordered_proposals.dptr_);
+      FRCNN_CUDA_CHECK(cudaPeekAtLastError());
+
+      std::vector<float> cpu_ordered_proposals(5 * rpn_pre_nms_top_n);
+      FRCNN_CUDA_CHECK(cudaMemcpy(cpu_ordered_proposals.data(), 
+                                ordered_proposals.dptr_,
+                                sizeof(float) * cpu_ordered_proposals.size(),
+                                cudaMemcpyDeviceToHost)); // less than 64K
+
       /* perform nms */
       std::vector<int> _keep(rpn_pre_nms_top_n);
       int out_size = 0;
@@ -578,7 +602,7 @@ class ProposalGPUOp : public Operator{
       allocated_bytes += boxes_num * col_blocks * sizeof(uint64_t); 
       CHECK_LT(allocated_bytes, WORKSPACE_LIMIT) << "Allocating more memory than workspace limit";   
       // the following line does not need change since it the only place where requires host workspace
-      Tensor<cpu, 1, uint64_t> mask_host_tensor = ctx.requested[proposal::kTempSpace].get_host_space_typed<1, uint64_t>(Shape1(boxes_num * col_blocks));
+      Tensor<cpu, 1, uint64_t> mask_host_tensor = ctx.requested[proposal_v3::kTempSpace].get_host_space_typed<1, uint64_t>(Shape1(boxes_num * col_blocks));
       uint64_t *mask_dev = mask_tensor.dptr_;
       uint64_t *mask_host = mask_host_tensor.dptr_;
       _nms(ordered_proposals,
@@ -625,23 +649,23 @@ class ProposalGPUOp : public Operator{
     CHECK_EQ(in_grad.size(), 3);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 4> gbbox = in_grad[proposal::kBBoxPred].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 2> ginfo = in_grad[proposal::kImInfo].get<xpu, 2, real_t>(s);
+    Tensor<xpu, 4> gscores = in_grad[proposal_v3::kClsProb].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> gbbox = in_grad[proposal_v3::kBBoxPred].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 2> ginfo = in_grad[proposal_v3::kImInfo].get<xpu, 2, real_t>(s);
 
     // can not assume the grad would be zero
-    Assign(gscores, req[proposal::kClsProb], 0);
-    Assign(gbbox, req[proposal::kBBoxPred], 0);
-    Assign(ginfo, req[proposal::kImInfo], 0);
+    Assign(gscores, req[proposal_v3::kClsProb], 0);
+    Assign(gbbox, req[proposal_v3::kBBoxPred], 0);
+    Assign(ginfo, req[proposal_v3::kImInfo], 0);
   }
 
  private:
-  ProposalParam param_;
-};  // class ProposalGPUOp
+  ProposalParam_v3 param_;
+};  // class ProposalGPUOp_v3
 
 template<>
-Operator* CreateOp<gpu>(ProposalParam param) {
-  return new ProposalGPUOp<gpu>(param);
+Operator* CreateOp<gpu>(ProposalParam_v3 param) {
+  return new ProposalGPUOp_v3<gpu>(param);
 }
 }  // namespace op
 }  // namespace mxnet
