@@ -21,7 +21,7 @@
  * Copyright (c) 2015 by Contributors
  * \file quantization_int8-inl.h
  * \brief
- * \author Jingqiu Zhou
+ * \author Xiaotao Chen
 */
 #ifndef MXNET_OPERATOR_QUANTIZATION_INT8_INL_H_
 #define MXNET_OPERATOR_QUANTIZATION_INT8_INL_H_
@@ -58,6 +58,7 @@ struct Quantization_int8Para : public dmlc::Parameter<Quantization_int8Para> {
   float ema_decay;
   std::string grad_mode;
   uint64_t workspace;
+  bool fix_act_scale;
   DMLC_DECLARE_PARAMETER(Quantization_int8Para) {
     DMLC_DECLARE_FIELD(quant_mode).set_default("minmax")
     .describe("select quantization mode");
@@ -74,6 +75,8 @@ struct Quantization_int8Para : public dmlc::Parameter<Quantization_int8Para> {
     DMLC_DECLARE_FIELD(workspace).set_default(512)
     .describe("workspace for the clipping gradient backward of quantization int8 in MB, \
                the space should be double size of in_data. default to 512");
+    DMLC_DECLARE_FIELD(fix_act_scale).set_default(false)
+    .describe("fix the minmax value of activation or not. defalut is False");
   }
 };
 
@@ -245,11 +248,16 @@ void find_max(const OpContext &ctx, const TBlob &data, mshadow::Stream<xpu> *s,
                  F<mshadow_op::round>(data /quant_unit_expr) * quant_unit_expr);
         } 
         else {
-          if (ctx.is_train > 0) {
+          if (ctx.is_train > 0 && param_.fix_act_scale == false) {
             find_max(ctx, in_data[0], s, temp_reduce_space, in_min_t, in_max_t, src_shape, dst_shape);
             // upate act threshold with ema
             if (init) {
-                mshadow::Copy(aux, max_val, s);
+                // check the value of minmax in aux is  equal to 0, so this should be initialized. otherwise, the value of
+                // minmax load from checkpoint, this don't need init.
+                mshadow::Copy(threshold_tensor, aux, s);
+                if (threshold < 1e-6) {
+                  mshadow::Copy(aux, max_val, s);
+                }
                 init = false;
             }
             else {
