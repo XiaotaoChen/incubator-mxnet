@@ -153,6 +153,8 @@ class Initializer(object):
             elif desc.endswith('beta'):
                 self._init_beta(desc, arr)
                 self._verbose_print(desc, 'beta', arr)
+            elif desc.endswith("minmax"):
+                self._init_zero(desc, arr)
             elif desc.endswith('min'):
                 self._init_zero(desc, arr)
                 self._verbose_print(desc, 'min', arr)

@@ -231,7 +231,7 @@ void find_max(const OpContext &ctx, const TBlob &data, mshadow::Stream<xpu> *s,
 
 
         if (param_.is_weight) {
-          if (ctx.is_train > 0) {
+          if (ctx.is_train > 0 && param_.fix_act_scale == false) {
             find_max(ctx, in_data[0], s, temp_reduce_space, in_min_t, in_max_t, src_shape, dst_shape);
             mshadow::Copy(aux, max_val, s);
           }
