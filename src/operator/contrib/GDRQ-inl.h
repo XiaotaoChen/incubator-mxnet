@@ -152,35 +152,34 @@ class GDRQOp : public Operator {
     if (!param_.fix_alpha) {
       temp_reduce_size = ConfigReduce<xpu, DType>(
         s, data.shape_, mxnet::TShape(1, 1), &src_shape, &dst_shape);
-      // space for tmp_data/data_abs, temp_reudce_size, sum_t
+      // space for tmp_scalar, tmp_data/data_abs, temp_reudce_size
       workspace = ctx.requested[GDRQ_enum::kTempSpace]
-        .get_space_typed<xpu, 1, uint8_t>(Shape1(data.shape_.Size() * sizeof(DType) + temp_reduce_size + sizeof(DType)), s);
+        .get_space_typed<xpu, 1, uint8_t>(Shape1(sizeof(DType) + data.shape_.Size() * sizeof(DType) + 
+                                                 temp_reduce_size), s);
     }
     else {
-      // space for tmp_data
+      // space for tmp_scalar, tmp_data
       workspace = ctx.requested[GDRQ_enum::kTempSpace]
-        .get_space_typed<xpu, 1, uint8_t>(Shape1(data.shape_.Size() * sizeof(DType)), s);
+        .get_space_typed<xpu, 1, uint8_t>(Shape1(sizeof(DType) + data.shape_.Size() * sizeof(DType)), s);
     }
     uint64_t allocated_bytes = 0ULL;
+    Tensor<xpu, 1, DType> tmp_scalar(reinterpret_cast<DType*>(workspace.dptr_ + allocated_bytes), Shape1(1), s);
+    allocated_bytes += sizeof(DType);
 
-    Tensor<xpu, 4, DType> tmp_data(reinterpret_cast<DType*>(workspace.dptr_), data.shape_, s);
+    Tensor<xpu, 4, DType> tmp_data(reinterpret_cast<DType*>(workspace.dptr_ + allocated_bytes), data.shape_, s);
+    allocated_bytes += tmp_data.shape_.Size() * sizeof(DType);
 
     if (!param_.fix_alpha) {
       const int dev_id = ctx.run_ctx.ctx.dev_id;
-      TBlob data_abs_t(reinterpret_cast<DType *>(workspace.dptr_ + allocated_bytes), data.shape_, xpu::kDevMask, dev_id);
-      Tensor<xpu, 4, DType> data_abs = data_abs_t.get<xpu, 4, DType>(s);
-      allocated_bytes += data_abs.shape_.Size() * sizeof(DType);
+      TBlob data_abs_t(reinterpret_cast<DType *>(tmp_data.dptr_), data.shape_, xpu::kDevMask, dev_id);
 
-      data_abs = F<mshadow_op::abs>(data);
+      tmp_data = F<mshadow_op::abs>(data);
       
       Tensor<xpu, 1, char> temp_reduce_space(reinterpret_cast<char*>(workspace.dptr_ + allocated_bytes), 
                                              Shape1(temp_reduce_size), s);
       allocated_bytes += temp_reduce_size;
       
-      TBlob sum_t(reinterpret_cast<DType *>(workspace.dptr_ + allocated_bytes), Shape1(1), xpu::kDevMask, dev_id);
-      // threshold share the space with sum_t
-      Tensor<xpu, 1, DType> threshold = sum_t.get<xpu, 1, DType>(s);
-      allocated_bytes += sizeof(DType);
+      TBlob sum_t(reinterpret_cast<DType *>(tmp_scalar.dptr_), Shape1(1), xpu::kDevMask, dev_id);
 
       // sum(data_abs)
       broadcast::Reduce<red::sum, 2, DType, mshadow::op::identity>(
@@ -189,21 +188,18 @@ class GDRQOp : public Operator {
       ScalarExp<DType> ktimes_expr(DType(param_.ktimes));
       real_t total_num = static_cast<real_t>(data.shape_.Size());
       ScalarExp<DType> total_num_expr(DType(1.0 / total_num));
-      threshold = ktimes_expr * (threshold * total_num_expr);
+      tmp_scalar = ktimes_expr * (tmp_scalar * total_num_expr);
 
       if (param_.is_weight) {
-        mshadow::Copy(aux, threshold, s);
+        mshadow::Copy(aux, tmp_scalar, s);
       }
       else {
         ScalarExp<DType> lamda_expr(param_.lamda);
-        aux = aux + lamda_expr * (aux - threshold);
+        aux = aux + lamda_expr * (aux - tmp_scalar);
       }
     }
 
-    DType tmp_t = get_scalar<xpu, DType>(aux, s, ctx);
-    ScalarExp<DType> tmp_t_expr(tmp_t);
-
-    tmp_data = F<mshadow_op::clip>(data, tmp_t_expr);
+    tmp_data = F<mshadow_op::clip>(data, broadcast_scalar(aux, data.shape_));
 
     // assign data to out
     if (ctx.is_train > 0 && quant_countdown > 0) {
@@ -211,8 +207,9 @@ class GDRQOp : public Operator {
       quant_countdown = quant_countdown - 1;
     }
     else {
-      const ScalarExp<DType> quant_unit_expr(DType(tmp_t / QUANT_LEVEL));
-      Assign(out, req[GDRQ_enum::kOut], F<mshadow_op::round>(tmp_data / quant_unit_expr) * quant_unit_expr);
+      ScalarExp<DType> quant_level_expr(DType(1.0 / QUANT_LEVEL));
+      tmp_scalar = aux * quant_level_expr;
+      Assign(out, req[GDRQ_enum::kOut], F<mshadow_op::round>(tmp_data / broadcast_scalar(tmp_scalar, tmp_data.shape_)) * broadcast_scalar(tmp_scalar, tmp_data.shape_));
     }
   }
   
@@ -251,11 +248,8 @@ class GDRQOp : public Operator {
       mshadow::Copy(data_grad, out_data_grad, s);
     }
     else {
-      // TO-Do replace this redunction way to copy aux out.
       Tensor<xpu, 1, DType> aux = aux_states[GDRQ_enum::kAlpha].get<xpu, 1, DType>(s);
-      DType tmp_t = get_scalar<xpu, DType>(aux, s, ctx);
-      ScalarExp<DType> tmp_t_expr(tmp_t);
-      Assign(data_grad, req[GDRQ_enum::kOut], out_data_grad * F<mshadow_op::le>(data, tmp_t_expr));
+      Assign(data_grad, req[GDRQ_enum::kOut], out_data_grad * F<mshadow_op::le>(data, broadcast_scalar(aux, data.shape_)));
     }
   }
 
