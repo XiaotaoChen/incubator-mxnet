@@ -265,7 +265,7 @@ class Quantization_int8Op : public Operator {
     }
     else if (param_.grad_mode == std::string("clip")) {
       Tensor<xpu, 1, uint8_t> workspace = ctx.requested[Quantization_int8_enum::kTempSpace]
-        .get_space_typed<xpu, 1, uint8_t>(Shape1(2 * data.shape_.Size() * sizeof(DType)), s);
+        .get_space_typed<xpu, 1, uint8_t>(Shape1(2 * data.shape_.Size() * sizeof(DType) + sizeof(DType)), s);
       uint64_t allocated_bytes = 0ULL;
       Tensor<xpu, 4, DType> clip_condition(reinterpret_cast<DType*>(workspace.dptr_ + allocated_bytes), data.shape_, s);
       allocated_bytes += clip_condition.shape_.Size() * sizeof(DType);
