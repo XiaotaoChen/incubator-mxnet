@@ -75,6 +75,7 @@ void find_max(const OpContext &ctx, const TBlob &data, mshadow::Stream<xpu> *s,
 }
 
 struct Quantization_int8Para : public dmlc::Parameter<Quantization_int8Para> {
+  int nbits;
   std::string quant_mode; 
   bool is_weight;
   bool is_weight_perchannel;
@@ -83,6 +84,8 @@ struct Quantization_int8Para : public dmlc::Parameter<Quantization_int8Para> {
   std::string grad_mode;
   bool fix_act_scale;
   DMLC_DECLARE_PARAMETER(Quantization_int8Para) {
+    DMLC_DECLARE_FIELD(nbits).set_default(8)
+    .describe("the target number of bits of quantization, default to 8.");
     DMLC_DECLARE_FIELD(quant_mode).set_default("minmax")
     .describe("select quantization mode");
     DMLC_DECLARE_FIELD(is_weight).set_default(true)
@@ -107,7 +110,7 @@ class Quantization_int8Op : public Operator {
     this->param_ = param;
     quant_countdown = param.delay_quant;
     init=true;
-    QUANT_LEVEL = 15;
+    QUANT_LEVEL = std::pow(2, param.nbits) - 1;
   }
 
   virtual void Forward(const OpContext &ctx,
