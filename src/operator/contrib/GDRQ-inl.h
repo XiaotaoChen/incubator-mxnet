@@ -92,6 +92,7 @@ struct GDRQPara : public dmlc::Parameter<GDRQPara> {
   int delay_quant;
   bool fix_alpha;
   float ktimes;
+  std::string weight_grad_mode;
   DMLC_DECLARE_PARAMETER(GDRQPara) {
     DMLC_DECLARE_FIELD(nbits).set_default(4)
     .describe("the target number of bits of quantization, default to 4.");
@@ -107,6 +108,8 @@ struct GDRQPara : public dmlc::Parameter<GDRQPara> {
     .describe("fix alpha or not for activation, default to false.");
     DMLC_DECLARE_FIELD(ktimes).set_default(2)
     .describe("the coefficient to calculate threshold with mean. threshold = ktimes * mean. defalut to 2.");
+    DMLC_DECLARE_FIELD(weight_grad_mode).set_default("ste")
+    .describe("the gradients of weight passing mode: ste or clip. defalut to ste");
   }
 };
 
@@ -244,7 +247,7 @@ class GDRQOp : public Operator {
       out_data_grad = out_grad[GDRQ_enum::kOut].get<xpu, 4, DType>(s);
       data_grad = in_grad[GDRQ_enum::kData].get<xpu, 4, DType>(s);
     }
-    if (param_.is_weight) {
+    if (param_.is_weight && param_.weight_grad_mode == std::string("ste")) {
       mshadow::Copy(data_grad, out_data_grad, s);
     }
     else {
