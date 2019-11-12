@@ -92,30 +92,6 @@ void print_data_4D(mshadow::Tensor<xpu, 4, DType> data, mshadow::Stream<xpu> *s,
 }
 
 
-template<typename DType>
-struct find_maxabs {
-  MSHADOW_XINLINE static void Map(int i, DType *imin_range, DType* imax_range) {
-    if (i < 1){
-      *imax_range = MaxAbs(*imin_range, *imax_range);
-    }
-  }
-};
-
-template<typename xpu, typename DType>
-void find_max(const OpContext &ctx, const TBlob &data, mshadow::Stream<xpu> *s, 
-              mshadow::Tensor<xpu, 1, char> &temp_reduce_space, TBlob &in_min_t, TBlob &in_max_t,
-              const mxnet::TShape &src_shape, const mxnet::TShape &dst_shape){
-    using namespace mshadow;
-    using namespace mshadow::expr;
-    broadcast::Reduce<red::minimum, 2, DType, mshadow::op::identity>(
-        s, in_min_t.reshape(dst_shape), kWriteTo, temp_reduce_space, data.reshape(src_shape));
-    broadcast::Reduce<red::maximum, 2, DType, mshadow::op::identity>(
-        s, in_max_t.reshape(dst_shape), kWriteTo, temp_reduce_space, data.reshape(src_shape));
-
-    // the maxabs value is save in in_max_t
-    mxnet_op::Kernel<find_maxabs<DType>, xpu>::Launch(s, 1, in_min_t.dptr<DType>(), in_max_t.dptr<DType>());
-}
-
 struct FQNPara : public dmlc::Parameter<FQNPara> {
   int nbits;
   bool is_perchannel;
@@ -162,56 +138,56 @@ class FQNOp : public Operator {
     Tensor<xpu, 1, DType> mins = aux_states[FQN_enum::kMin].get<xpu, 1, DType>(s);
     Tensor<xpu, 1, DType> maxs = aux_states[FQN_enum::kMax].get<xpu, 1, DType>(s);
 
-    // if (param_.is_perchannel) {
-    //   if (ctx.is_train > 0) {
-    //     mins = minall_except_dim<0>(data);
-    //     maxs = maxall_except_dim<0>(data);
-    //     const ScalarExp<DType> eps(DType(1e-6));
-    //     maxs = maxs + eps;
-    //   }
-    //   const ScalarExp<DType> quant_level_rev(1.0/QUANT_LEVEL);
-    //   Assign(out, req[FQN_enum::kOut], 
-    //          F<mshadow_op::round>((data - mshadow::expr::broadcast<0>(mins, data.shape_)) / \
-    //                                mshadow::expr::broadcast<0>((maxs - mins) * quant_level_rev, data.shape_)) * \
-    //                                mshadow::expr::broadcast<0>((maxs - mins) * quant_level_rev, data.shape_) + \
-    //                                mshadow::expr::broadcast<0>(mins, data.shape_));
-    // }
-    // else {
-    //   if (ctx.is_train > 0) {
-    //     mxnet::TShape src_shape, dst_shape;
-    //     size_t temp_reduce_size;
-    //     temp_reduce_size = ConfigReduce<xpu, DType>(
-    //         s, data.shape_, mxnet::TShape(1, 1), &src_shape, &dst_shape);
-    //       // space for temp_reudce_size, reduce_value
-    //     Tensor<xpu, 1, uint8_t> workspace = ctx.requested[FQN_enum::kTempSpace]
-    //         .get_space_typed<xpu, 1, uint8_t>(Shape1(temp_reduce_size + sizeof(DType)), s);
+    if (param_.is_perchannel) {
+      if (ctx.is_train > 0) {
+        mins = minall_except_dim<0>(data);
+        maxs = maxall_except_dim<0>(data);
+        const ScalarExp<DType> eps(DType(1e-6));
+        maxs = maxs + eps;
+      }
+      const ScalarExp<DType> quant_level_rev(1.0/QUANT_LEVEL);
+      Assign(out, req[FQN_enum::kOut], 
+             F<mshadow_op::round>((data - mshadow::expr::broadcast<0>(mins, data.shape_)) / \
+                                   mshadow::expr::broadcast<0>((maxs - mins) * quant_level_rev, data.shape_)) * \
+                                   mshadow::expr::broadcast<0>((maxs - mins) * quant_level_rev, data.shape_) + \
+                                   mshadow::expr::broadcast<0>(mins, data.shape_));
+    }
+    else {
+      if (ctx.is_train > 0) {
+        mxnet::TShape src_shape, dst_shape;
+        size_t temp_reduce_size;
+        temp_reduce_size = ConfigReduce<xpu, DType>(
+            s, data.shape_, mxnet::TShape(1, 1), &src_shape, &dst_shape);
+          // space for temp_reudce_size, reduce_value
+        Tensor<xpu, 1, uint8_t> workspace = ctx.requested[FQN_enum::kTempSpace]
+            .get_space_typed<xpu, 1, uint8_t>(Shape1(temp_reduce_size + sizeof(DType)), s);
         
-    //     uint64_t allocated_bytes = 0ULL;
-    //     Tensor<xpu, 1, char> temp_reduce_space(reinterpret_cast<char*>(workspace.dptr_ + allocated_bytes), 
-    //                                       Shape1(temp_reduce_size), s);
-    //     allocated_bytes += temp_reduce_size;
+        uint64_t allocated_bytes = 0ULL;
+        Tensor<xpu, 1, char> temp_reduce_space(reinterpret_cast<char*>(workspace.dptr_ + allocated_bytes), 
+                                          Shape1(temp_reduce_size), s);
+        allocated_bytes += temp_reduce_size;
 
-    //     const int dev_id = ctx.run_ctx.ctx.dev_id;
-    //     TBlob in_reduce_t(reinterpret_cast<DType *>(workspace.dptr_ + allocated_bytes), Shape1(1), xpu::kDevMask,
-    //                   dev_id);
-    //     Tensor<xpu, 1, DType> reduce_val = in_reduce_t.get<xpu, 1, DType>(s);
-    //     allocated_bytes += sizeof(DType);
+        const int dev_id = ctx.run_ctx.ctx.dev_id;
+        TBlob in_reduce_t(reinterpret_cast<DType *>(workspace.dptr_ + allocated_bytes), Shape1(1), xpu::kDevMask,
+                      dev_id);
+        Tensor<xpu, 1, DType> reduce_val = in_reduce_t.get<xpu, 1, DType>(s);
+        allocated_bytes += sizeof(DType);
         
-    //     // min value
-    //     broadcast::Reduce<red::minimum, 2, DType, mshadow::op::identity>(
-    //         s, in_reduce_t.reshape(dst_shape), kWriteTo, temp_reduce_space, in_data[0].reshape(src_shape));
-    //     mshadow::Copy(mins, reduce_val, s);
-    //     // max value
-    //     broadcast::Reduce<red::maximum, 2, DType, mshadow::op::identity>(
-    //         s, in_reduce_t.reshape(dst_shape), kWriteTo, temp_reduce_space, in_data[0].reshape(src_shape));
-    //     mshadow::Copy(maxs, reduce_val, s);
-    //   }
-    //   const ScalarExp<DType> quant_level_rev(1.0/QUANT_LEVEL);
-    //   Assign(out, req[FQN_enum::kOut], F<mshadow_op::round>((data - broadcast_scalar(mins, data.shape_)) / \
-    //                                                          broadcast_scalar((maxs - mins) * quant_level_rev, data.shape_)) * \
-    //                                                          broadcast_scalar((maxs - mins) * quant_level_rev, data.shape_) + \
-    //                                                          broadcast_scalar(mins, data.shape_));
-    // }
+        // min value
+        broadcast::Reduce<red::minimum, 2, DType, mshadow::op::identity>(
+            s, in_reduce_t.reshape(dst_shape), kWriteTo, temp_reduce_space, in_data[0].reshape(src_shape));
+        mshadow::Copy(mins, reduce_val, s);
+        // max value
+        broadcast::Reduce<red::maximum, 2, DType, mshadow::op::identity>(
+            s, in_reduce_t.reshape(dst_shape), kWriteTo, temp_reduce_space, in_data[0].reshape(src_shape));
+        mshadow::Copy(maxs, reduce_val, s);
+      }
+      const ScalarExp<DType> quant_level_rev(1.0/QUANT_LEVEL);
+      Assign(out, req[FQN_enum::kOut], F<mshadow_op::round>((data - broadcast_scalar(mins, data.shape_)) / \
+                                                             broadcast_scalar((maxs - mins) * quant_level_rev, data.shape_)) * \
+                                                             broadcast_scalar((maxs - mins) * quant_level_rev, data.shape_) + \
+                                                             broadcast_scalar(mins, data.shape_));
+    }
   }
 
   virtual void Backward(const OpContext & ctx,
