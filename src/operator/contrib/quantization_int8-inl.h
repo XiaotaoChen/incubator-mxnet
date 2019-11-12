@@ -235,7 +235,8 @@ class Quantization_int8Op : public Operator {
               Tensor<xpu, 1, DType> maxs(reinterpret_cast<DType*>(workspace.dptr_ + allocated_bytes), Shape1(channels), s);
               allocated_bytes += channels * sizeof(DType);
               maxs = maxall_except_dim<0>(F<mshadow_op::abs>(data));
-              mshadow::Copy(aux, maxs, s);
+              const ScalarExp<DType> eps(DType(1e-6));
+              Assign(aux, kWriteTo, maxs + eps); // avoid the values of some channel is zero.
             }
             else {
               find_max<xpu, DType>(ctx, in_data[0], s, temp_reduce_space, in_min_t, in_max_t, src_shape, dst_shape);
