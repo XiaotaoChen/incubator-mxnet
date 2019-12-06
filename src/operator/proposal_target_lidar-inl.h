@@ -39,8 +39,7 @@ inline void SampleROI(
   Tensor<cpu, 2, DType> &&rois,
   Tensor<cpu, 1, DType> &&labels,
   Tensor<cpu, 2, DType> &&bbox_targets,
-  Tensor<cpu, 2, DType> &&bbox_weights,
-  Tensor<cpu, 1, DType> &&match_gt_ious
+  Tensor<cpu, 2, DType> &&bbox_weights
 );
 
 template <typename DType>
@@ -59,12 +58,18 @@ void ExpandBboxRegressionTargets(
 );
 
 template <typename DType>
-void NonLinearTransformAndNormalization(
+void NonLinearTransformWithAngleAndNormalization(
   const Tensor<cpu, 2, DType> &ex_rois,
   const Tensor<cpu, 2, DType> &gt_rois,
   Tensor<cpu, 2, DType> &targets,
   const Tensor<cpu, 1, DType> &bbox_mean,
   const Tensor<cpu, 1, DType> &bbox_std
+);
+
+template <typename DType>
+void outer_gt_bbox(
+  const Tensor<cpu, 2, DType> &gt_rois, 
+  Tensor<cpu, 2, DType> &gt_boxes_2point
 );
 
 } // namespace proposal_target_lidar_v1
@@ -75,7 +80,7 @@ namespace op {
 
 namespace proposal_target_lidar_enum {
 enum ProposalTargetLidarInputs {kRois, kGtBboxes};
-enum ProposalTargetLidarOutputs {kRoiOutput, kLabel, kBboxTarget, kBboxWeight, kMatch_gt_iou};
+enum ProposalTargetLidarOutputs {kRoiOutput, kLabel, kBboxTarget, kBboxWeight};
 }
 
 struct ProposalTargetLidarParam : public dmlc::Parameter<ProposalTargetLidarParam> {
@@ -88,7 +93,6 @@ struct ProposalTargetLidarParam : public dmlc::Parameter<ProposalTargetLidarPara
   float bg_thresh_lo;
   bool proposal_without_gt;
   bool class_agnostic;
-  bool output_iou;
   nnvm::Tuple<float> bbox_mean;
   nnvm::Tuple<float> bbox_std;
   nnvm::Tuple<float> bbox_weight;
@@ -103,13 +107,12 @@ struct ProposalTargetLidarParam : public dmlc::Parameter<ProposalTargetLidarPara
     DMLC_DECLARE_FIELD(fg_fraction).set_default(0.25f).describe("Fraction of foreground proposals");
     DMLC_DECLARE_FIELD(proposal_without_gt).describe("Do not append ground-truth bounding boxes to output");
     DMLC_DECLARE_FIELD(class_agnostic).set_default(false).describe("class agnostic bbox_target");
-    DMLC_DECLARE_FIELD(output_iou).set_default(false).describe("output match_gt_iou");
-    float tmp[] = {0.f, 0.f, 0.f, 0.f};
-    DMLC_DECLARE_FIELD(bbox_mean).set_default(nnvm::Tuple<float>(tmp, tmp+4)).describe("Bounding box mean");
-    tmp[0] = 0.1f; tmp[1] = 0.1f; tmp[2] = 0.2f; tmp[3] = 0.2f;
-    DMLC_DECLARE_FIELD(bbox_std).set_default(nnvm::Tuple<float>(tmp, tmp+4)).describe("Bounding box std");
-    tmp[0] = 1.f; tmp[1] = 1.f; tmp[2] = 1.f; tmp[3] = 1.f;
-    DMLC_DECLARE_FIELD(bbox_weight).set_default(nnvm::Tuple<float>(tmp, tmp+4)).describe("Foreground bounding box weight");
+    float tmp[] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    DMLC_DECLARE_FIELD(bbox_mean).set_default(nnvm::Tuple<float>(tmp, tmp+6)).describe("Bounding box mean");
+    tmp[0] = 1.f; tmp[1] = 1.f; tmp[2] = 1.f; tmp[3] = 1.f; tmp[4] = 1.f; tmp[5] = 1.f;
+    DMLC_DECLARE_FIELD(bbox_std).set_default(nnvm::Tuple<float>(tmp, tmp+6)).describe("Bounding box std");
+    tmp[0] = 1.f; tmp[1] = 1.f; tmp[2] = 1.f; tmp[3] = 1.f; tmp[4] = 1.f; tmp[5] = 1.f;
+    DMLC_DECLARE_FIELD(bbox_weight).set_default(nnvm::Tuple<float>(tmp, tmp+6)).describe("Foreground bounding box weight");
   }
 };
 
@@ -128,7 +131,7 @@ class ProposalTargetLidarOp : public Operator {
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(in_data.size(), 2);
-    CHECK_EQ(out_data.size(), 5);
+    CHECK_EQ(out_data.size(), 4);
     CHECK_GT(req.size(), 4);
     CHECK_EQ(req[proposal_target_lidar_enum::kRoiOutput], kWriteTo);
     CHECK_EQ(req[proposal_target_lidar_enum::kLabel], kWriteTo);
@@ -137,12 +140,12 @@ class ProposalTargetLidarOp : public Operator {
     Stream<xpu> *s = ctx.get_stream<xpu>();
     const index_t num_image         = param_.batch_images;
     const index_t num_roi           = in_data[proposal_target_lidar_enum::kRois].Size() / (num_image * 4);
-    const index_t num_gtbbox        = in_data[proposal_target_lidar_enum::kGtBboxes].Size() / (num_image * 5);
+    const index_t num_gtbbox        = in_data[proposal_target_lidar_enum::kGtBboxes].Size() / (num_image * 10);
     const int image_rois            = param_.image_rois;
     Tensor<xpu, 3, DType> xpu_rois      = in_data[proposal_target_lidar_enum::kRois].
                                           get_with_shape<xpu, 3, DType>(Shape3(num_image, num_roi, 4), s);
     Tensor<xpu, 3, DType> xpu_gt_bboxes = in_data[proposal_target_lidar_enum::kGtBboxes].
-                                          get_with_shape<xpu, 3, DType>(Shape3(num_image, num_gtbbox, 5), s);
+                                          get_with_shape<xpu, 3, DType>(Shape3(num_image, num_gtbbox, 10), s);
     TensorContainer<cpu, 3, DType> rois     (xpu_rois.shape_);
     TensorContainer<cpu, 3, DType> gt_bboxes(xpu_gt_bboxes.shape_);
     Copy(rois, xpu_rois, s);
@@ -155,17 +158,12 @@ class ProposalTargetLidarOp : public Operator {
     for (index_t i = 0; i < num_image; ++i) {
       kept_gtbboxes.push_back(std::vector<Tensor<cpu, 1, DType>>());
       for (index_t j = 0; j < gt_bboxes.size(1); ++j) {
-        if (gt_bboxes[i][j][4] != -1) {
+        if (gt_bboxes[i][j][9] != -1) {
           kept_gtbboxes[i].push_back(gt_bboxes[i][j]);
         }
       }
     }
 
-    //for append gt
-    std::vector<TensorContainer<cpu, 1, DType>> gt_bboxes_tmp(num_image * num_gtbbox);
-    for (index_t i = 0; i < gt_bboxes_tmp.size(); ++i) {
-      gt_bboxes_tmp[i].Resize(Shape1(4));
-    }
     index_t start = 0;
     for (index_t i = 0; i < num_image; ++i) {
       kept_rois.push_back(std::vector<Tensor<cpu, 1, DType>>());
@@ -176,37 +174,37 @@ class ProposalTargetLidarOp : public Operator {
       }
       if (!param_.proposal_without_gt) {
         // all gt bboxes are appended
-        for (index_t j = 0; j < kept_gtbboxes[i].size(); ++j) {
-          Tensor<cpu, 1, DType> gt_tmp = gt_bboxes_tmp[start++];
-        //  gt_tmp[0] = i;
-          Copy(gt_tmp, kept_gtbboxes[i][j].Slice(0, 4));
-          kept_rois[i].push_back(gt_tmp);
-        }
+        LOG(FATAL) << "proposal with gt is not supported currently";
       }
     }
 
     TensorContainer<cpu, 3, DType> cpu_output_rois(Shape3(num_image, image_rois, 4), 0.f);
     TensorContainer<cpu, 2, DType> cpu_labels(Shape2(num_image, image_rois), 0.f);
-    TensorContainer<cpu, 3, DType> cpu_bbox_targets(Shape3(num_image, image_rois, param_.num_classes * 4), 0.f);
-    TensorContainer<cpu, 3, DType> cpu_bbox_weights(Shape3(num_image, image_rois, param_.num_classes * 4), 0.f);
-    TensorContainer<cpu, 2, DType> cpu_match_gt_ious(Shape2(num_image, image_rois), 0.f);
+    TensorContainer<cpu, 3, DType> cpu_bbox_targets(Shape3(num_image, image_rois, param_.num_classes * 6), 0.f);
+    TensorContainer<cpu, 3, DType> cpu_bbox_weights(Shape3(num_image, image_rois, param_.num_classes * 6), 0.f);
 
     index_t fg_rois_per_image = static_cast<index_t>(image_rois * param_.fg_fraction);
-    TensorContainer<cpu, 1, DType> bbox_mean(Shape1(4));
-    TensorContainer<cpu, 1, DType> bbox_std(Shape1(4));
-    TensorContainer<cpu, 1, DType> bbox_weight(Shape1(4));
+    TensorContainer<cpu, 1, DType> bbox_mean(Shape1(6));
+    TensorContainer<cpu, 1, DType> bbox_std(Shape1(6));
+    TensorContainer<cpu, 1, DType> bbox_weight(Shape1(6));
     bbox_mean[0] = param_.bbox_mean[0];
     bbox_mean[1] = param_.bbox_mean[1];
     bbox_mean[2] = param_.bbox_mean[2];
     bbox_mean[3] = param_.bbox_mean[3];
+    bbox_mean[4] = param_.bbox_mean[4];
+    bbox_mean[5] = param_.bbox_mean[5];
     bbox_std[0] = param_.bbox_std[0];
     bbox_std[1] = param_.bbox_std[1];
     bbox_std[2] = param_.bbox_std[2];
     bbox_std[3] = param_.bbox_std[3];
+    bbox_std[4] = param_.bbox_std[4];
+    bbox_std[5] = param_.bbox_std[5];
     bbox_weight[0] = param_.bbox_weight[0];
     bbox_weight[1] = param_.bbox_weight[1];
     bbox_weight[2] = param_.bbox_weight[2];
     bbox_weight[3] = param_.bbox_weight[3];
+    bbox_weight[4] = param_.bbox_weight[4];
+    bbox_weight[5] = param_.bbox_weight[5];
     for (index_t i = 0; i < num_image; ++i) {
       TensorContainer<cpu, 2, DType> kept_rois_i    (Shape2(kept_rois[i].size(),     rois.size(2)));
       TensorContainer<cpu, 2, DType> kept_gtbboxes_i(Shape2(kept_gtbboxes[i].size(), gt_bboxes.size(2)));
@@ -232,8 +230,7 @@ class ProposalTargetLidarOp : public Operator {
         cpu_output_rois[i],
         cpu_labels[i],
         cpu_bbox_targets[i],
-        cpu_bbox_weights[i],
-        cpu_match_gt_ious[i]
+        cpu_bbox_weights[i]
       );
     }
 
@@ -242,17 +239,14 @@ class ProposalTargetLidarOp : public Operator {
     Tensor<xpu, 2, DType> xpu_labels       = out_data[proposal_target_lidar_enum::kLabel].
                                              get_with_shape<xpu, 2, DType>(Shape2(num_image, image_rois), s);
     Tensor<xpu, 3, DType> xpu_bbox_targets = out_data[proposal_target_lidar_enum::kBboxTarget].
-                                             get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 4), s);
+                                             get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 6), s);
     Tensor<xpu, 3, DType> xpu_bbox_weights = out_data[proposal_target_lidar_enum::kBboxWeight].
-                                             get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 4), s);
-    Tensor<xpu, 2, DType> xpu_match_gt_ious = out_data[proposal_target_lidar_enum::kMatch_gt_iou].
-                                             get_with_shape<xpu, 2, DType>(Shape2(num_image, image_rois), s);
-
+                                             get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 6), s);
+    
     Copy(xpu_output_rois, cpu_output_rois, s);
     Copy(xpu_labels, cpu_labels, s);
     Copy(xpu_bbox_targets, cpu_bbox_targets, s);
     Copy(xpu_bbox_weights, cpu_bbox_weights, s);
-    Copy(xpu_match_gt_ious, cpu_match_gt_ious, s);
   }
 
   virtual void Backward(const OpContext &ctx,
@@ -266,11 +260,11 @@ class ProposalTargetLidarOp : public Operator {
     using namespace mshadow::expr;
     CHECK_EQ(in_grad.size(), 2);
     const index_t num_image         = param_.batch_images;
-    const index_t num_gtbbox        = in_data[proposal_target_lidar_enum::kGtBboxes].Size() / (num_image * 5);
+    const index_t num_gtbbox        = in_data[proposal_target_lidar_enum::kGtBboxes].Size() / (num_image * 10);
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
     Tensor<xpu, 3, DType> rois      = in_grad[proposal_target_lidar_enum::kRois].get<xpu, 3, DType>(s);
-    Tensor<xpu, 3, DType> gt_bboxes = in_grad[proposal_target_lidar_enum::kGtBboxes].get_with_shape<xpu, 3, DType>(Shape3(num_image, num_gtbbox, 5), s);
+    Tensor<xpu, 3, DType> gt_bboxes = in_grad[proposal_target_lidar_enum::kGtBboxes].get_with_shape<xpu, 3, DType>(Shape3(num_image, num_gtbbox, 10), s);
 
     rois = 0.f;
     gt_bboxes = 0.f;
@@ -295,15 +289,11 @@ class ProposalTargetLidarProp : public OperatorProperty {
   }
 
   int NumVisibleOutputs() const override {
-    if (param_.output_iou) {
-      return 5;
-    } else {
-      return 4;
-    }
+    return 4;
   }
 
   int NumOutputs() const override {
-    return 5;
+    return 4;
   }
 
   std::vector<std::string> ListArguments() const override {
@@ -311,7 +301,7 @@ class ProposalTargetLidarProp : public OperatorProperty {
   }
 
   std::vector<std::string> ListOutputs() const override {
-    return {"roi_output", "label", "bbox_target", "bbox_weight", "match_gt_iou"};
+    return {"roi_output", "label", "bbox_target", "bbox_weight"};
   }
 
   bool InferShape(std::vector<TShape> *in_shape,
@@ -322,18 +312,16 @@ class ProposalTargetLidarProp : public OperatorProperty {
     const TShape &dshape = in_shape->at(proposal_target_lidar_enum::kRois);
     const int image_rois  = param_.image_rois;
 
-    auto output_rois_shape = Shape3(dshape[0], image_rois, 4);
+    auto output_rois_shape = Shape3(dshape[0], image_rois, 6);
     auto label_shape = Shape2(dshape[0], image_rois);
-    auto bbox_target_shape = Shape3(dshape[0], image_rois, param_.num_classes * 4);
-    auto bbox_weight_shape = Shape3(dshape[0], image_rois, param_.num_classes * 4);
-    auto match_gt_iou_shape = Shape2(dshape[0], image_rois);
+    auto bbox_target_shape = Shape3(dshape[0], image_rois, param_.num_classes * 6);
+    auto bbox_weight_shape = Shape3(dshape[0], image_rois, param_.num_classes * 6);
 
     out_shape->clear();
     out_shape->push_back(output_rois_shape);
     out_shape->push_back(label_shape);
     out_shape->push_back(bbox_target_shape);
     out_shape->push_back(bbox_weight_shape);
-    out_shape->push_back(match_gt_iou_shape);
     aux_shape->clear();
 
     return true;

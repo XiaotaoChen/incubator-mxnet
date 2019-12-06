@@ -7,6 +7,7 @@
 #include "./proposal_target_lidar-inl.h"
 #include <algorithm>
 #include <cstdio>
+#include <math.h>
 using std::min;
 using std::max;
 using std::vector;
@@ -18,6 +19,10 @@ using std::log;
 
 namespace mshadow {
 namespace proposal_target_lidar_v1 {
+
+
+
+
 template <typename DType>
 inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
                       const Tensor<cpu, 2, DType> &gt_boxes,
@@ -34,16 +39,13 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
                       Tensor<cpu, 2, DType> &&rois,
                       Tensor<cpu, 1, DType> &&labels,
                       Tensor<cpu, 2, DType> &&bbox_targets,
-                      Tensor<cpu, 2, DType> &&bbox_weights,
-                      Tensor<cpu, 1, DType> &&match_gt_ious) {
-  /*
-  overlaps = bbox_overlaps(rois[:, 1:].astype(np.float), gt_boxes[:, :4].astype(np.float))
-  gt_assignment = overlaps.argmax(axis=1)
-  overlaps = overlaps.max(axis=1)
-  labels = gt_boxes[gt_assignment, 4]
-  */
+                      Tensor<cpu, 2, DType> &&bbox_weights) {
+  TensorContainer<cpu, 2 , DType> gt_boxes_2point(Shape2(gt_boxes.size(0), 4), 0.f);
+  // calculate outer box
+  outer_gt_bbox(gt_boxes, gt_boxes_2point);
   TensorContainer<cpu, 2, DType> IOUs(Shape2(all_rois.size(0), gt_boxes.size(0)), 0.f);
-  BBoxOverlap(all_rois, gt_boxes, IOUs);
+
+  BBoxOverlap(all_rois, gt_boxes_2point, IOUs);
 
   vector<DType> max_overlaps(all_rois.size(0), 0.f);
   vector<DType> all_labels(all_rois.size(0), 0.f);
@@ -59,7 +61,7 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
       }
       gt_assignment[i] = max_index;
       max_overlaps[i] = max_value;
-      all_labels[i] = gt_boxes[max_index][4];
+      all_labels[i] = gt_boxes[max_index][9];
   }
   /*
   fg_indexes = np.where(overlaps >= config.TRAIN.FG_THRESH)[0]
@@ -130,7 +132,6 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
       labels[i] = all_labels[kept_indexes[i]];
     }
     Copy(rois[i], all_rois[kept_indexes[i]]);
-    match_gt_ious[i] = max_overlaps[kept_indexes[i]];
   }
 
 
@@ -139,14 +140,14 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
       Copy(rois_tmp[i], rois[i]);
   }
 
-  TensorContainer<cpu, 2, DType> gt_bboxes_tmp(Shape2(rois.size(0), 4));
+  TensorContainer<cpu, 2, DType> gt_bboxes_tmp(Shape2(rois.size(0), 9));
   for (index_t i = 0; i < rois_tmp.size(0); ++i) {
-      Copy(gt_bboxes_tmp[i], gt_boxes[gt_assignment[kept_indexes[i]]].Slice(0, 4));
+      Copy(gt_bboxes_tmp[i], gt_boxes[gt_assignment[kept_indexes[i]]].Slice(0, 9));
   }
-  TensorContainer<cpu, 2, DType> targets(Shape2(rois.size(0), 4));
-  NonLinearTransformAndNormalization(rois_tmp, gt_bboxes_tmp, targets, bbox_mean, bbox_std);
+  TensorContainer<cpu, 2, DType> targets(Shape2(rois.size(0), 6));
+  NonLinearTransformWithAngleAndNormalization(rois_tmp, gt_bboxes_tmp, targets, bbox_mean, bbox_std);
 
-  TensorContainer<cpu, 2, DType> bbox_target_data(Shape2(targets.size(0), 5));
+  TensorContainer<cpu, 2, DType> bbox_target_data(Shape2(targets.size(0), 7));
   for (index_t i = 0; i < bbox_target_data.size(0); ++i) {
       if (class_agnostic){
         //class-agnostic regression class index = {0, 1}
@@ -155,7 +156,7 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
       }else{
         bbox_target_data[i][0] = labels[i];
       }
-      Copy(bbox_target_data[i].Slice(1, 5), targets[i]);
+      Copy(bbox_target_data[i].Slice(1, 7), targets[i]);
   }
 
   ExpandBboxRegressionTargets(bbox_target_data, bbox_targets, bbox_weights, bbox_weight);
@@ -190,19 +191,20 @@ void ExpandBboxRegressionTargets(const Tensor<cpu, 2, DType> &bbox_target_data,
                                  Tensor<cpu, 2, DType> &bbox_weights,
                                  const Tensor<cpu, 1, DType> &bbox_weight) {
   index_t num_bbox = bbox_target_data.size(0);
+  index_t num = 6;
   for (index_t i = 0; i < num_bbox; ++i) {
     if (bbox_target_data[i][0] > 0) {
       index_t cls = bbox_target_data[i][0];
-      index_t start = 4 * cls;
-      index_t end = start + 4;
-      Copy(bbox_targets[i].Slice(start, end), bbox_target_data[i].Slice(1, 5));
+      index_t start = num * cls;
+      index_t end = start + num;
+      Copy(bbox_targets[i].Slice(start, end), bbox_target_data[i].Slice(1, 7));
       Copy(bbox_weights[i].Slice(start, end), bbox_weight);
     }
   }
 }
 
 template <typename DType>
-void NonLinearTransformAndNormalization(const Tensor<cpu, 2, DType> &ex_rois,
+void NonLinearTransformWithAngleAndNormalization(const Tensor<cpu, 2, DType> &ex_rois,
                                         const Tensor<cpu, 2, DType> &gt_rois,
                                         Tensor<cpu, 2, DType> &targets,
                                         const Tensor<cpu, 1, DType> &bbox_mean,
@@ -213,20 +215,60 @@ void NonLinearTransformAndNormalization(const Tensor<cpu, 2, DType> &ex_rois,
       DType ex_height = ex_rois[i][3] - ex_rois[i][1] + 1.f;
       DType ex_ctr_x  = ex_rois[i][0] + 0.5 * (ex_width - 1.f);
       DType ex_ctr_y  = ex_rois[i][1] + 0.5 * (ex_height - 1.f);
-      DType gt_width  = gt_rois[i][2] - gt_rois[i][0] + 1.f;
-      DType gt_height = gt_rois[i][3] - gt_rois[i][1] + 1.f;
-      DType gt_ctr_x  = gt_rois[i][0] + 0.5 * (gt_width - 1.f);
-      DType gt_ctr_y  = gt_rois[i][1] + 0.5 * (gt_height - 1.f);
+
+      // DType gt_width  = gt_rois[i][2] - gt_rois[i][0] + 1.f;
+      // DType gt_height = gt_rois[i][3] - gt_rois[i][1] + 1.f;
+      // DType gt_ctr_x  = gt_rois[i][0] + 0.5 * (gt_width - 1.f);
+      // DType gt_ctr_y  = gt_rois[i][1] + 0.5 * (gt_height - 1.f);
+      DType gt_width = sqrt(pow(gt_rois[i][2] - gt_rois[i][0], 2.0) + pow(gt_rois[i][3] - gt_rois[i][1], 2.0)) + 1.f;
+      DType gt_height = sqrt(pow(gt_rois[i][2] - gt_rois[i][4], 2.0) + pow(gt_rois[i][3] - gt_rois[i][5], 2.0)) + 1.f;
+      DType gt_ctr_x = (gt_rois[i][0] + gt_rois[i][2] + gt_rois[i][4] + gt_rois[i][6]) / 4.f;
+      DType gt_ctr_y = (gt_rois[i][1] + gt_rois[i][3] + gt_rois[i][5] + gt_rois[i][7]) / 4.f;
+
+      
       targets[i][0]   = (gt_ctr_x - ex_ctr_x) / (ex_width + 1e-14f);
       targets[i][1]   = (gt_ctr_y - ex_ctr_y) / (ex_height + 1e-14f);
       targets[i][2]   = log(gt_width / ex_width);
       targets[i][3]   = log(gt_height / ex_height);
+      targets[i][4]   = cos(gt_rois[i][8]);
+      targets[i][5]   = sin(gt_rois[i][8]);
       targets[i] -= bbox_mean;
       targets[i] /= bbox_std;
   }
 }
 
-}  // namespace pt
+template <typename DType>
+void outer_gt_bbox(const Tensor<cpu, 2, DType> &gt_rois, Tensor<cpu, 2, DType> &gt_boxes_2point) {
+  for (int i=0; i < gt_rois.size(0); i++) {
+    DType x_min = gt_rois[i][0];
+    DType x_max = gt_rois[i][0];
+    DType y_min = gt_rois[i][1];
+    DType y_max = gt_rois[i][1];
+    for (int j=1; j < 4; j++) {
+      DType tmp_x = gt_rois[i][j * 2];
+      DType tmp_y = gt_rois[i][j * 2 + 1];
+      if (x_min > tmp_x) {
+        x_min = tmp_x;
+      }
+      else if (x_max < tmp_x) {
+        x_max = tmp_x;
+      }
+
+      if (y_min > tmp_y) {
+        y_min = tmp_y;
+      }
+      else if (y_max < tmp_y) {
+        y_max = tmp_y;
+      }
+    }
+    gt_boxes_2point[i][0] = x_min;
+    gt_boxes_2point[i][1] = y_min;
+    gt_boxes_2point[i][2] = y_max;
+    gt_boxes_2point[i][3] = y_max;
+  }
+}
+
+}  // namespace proposal_target_lidar_v1
 
 }  // namespace mshadow
 
