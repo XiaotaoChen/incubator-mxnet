@@ -21,7 +21,6 @@
 
 namespace mshadow {
 namespace proposal_target_lidar_v1 {
-
 template <typename DType>
 inline void SampleROI(
   const Tensor<cpu, 2, DType> &all_rois,
@@ -83,6 +82,57 @@ enum ProposalTargetLidarInputs {kRois, kGtBboxes};
 enum ProposalTargetLidarOutputs {kRoiOutput, kLabel, kBboxTarget, kBboxWeight};
 }
 
+template<typename xpu, typename DType>
+void print_shape_3D(mshadow::Tensor<xpu, 3, DType> data, std::string flag) {
+  printf("%s size:%d, size0:%d, size1:%d, size2:%d\n",flag.c_str(), data.shape_.Size(), 
+            data.size(0), data.size(1), data.size(2));
+}
+
+template<typename xpu, typename DType>
+void print_shape_2D(mshadow::Tensor<xpu, 2, DType> data, std::string flag) {
+  printf("%s size:%d, size0:%d, size1:%d\n",flag.c_str(), data.shape_.Size(), 
+            data.size(0), data.size(1));
+}
+
+template <typename xpu, typename DType>
+void print_data_3D(mshadow::Tensor<xpu, 3, DType> data, mshadow::Stream<xpu> *s, const OpContext &ctx, std::string flag) {
+    mshadow::Stream<cpu> *s_cpu = ctx.get_stream<cpu>();
+    DType* temp;
+    temp = (DType*) malloc(data.shape_.Size() * sizeof(DType));
+    mshadow::Tensor<cpu, 3, DType> temp_tensor(temp, data.shape_, s_cpu);
+    mshadow::Copy(temp_tensor, data, s);
+    printf("--------------------------- %s ---------------------------\n", flag.c_str());
+    for (int i=0; i< temp_tensor.size(0); i++) {
+     for (int j=0; j< temp_tensor.size(1); j++) {
+       for (int k=0; k< temp_tensor.size(2); k++) {
+          printf("%f ", temp_tensor[i][j][k]);
+       }
+       printf("\n");
+     } 
+     printf("\n");
+    }
+    printf("\n");
+    free(temp);
+}
+
+template <typename xpu, typename DType>
+void print_data_2D(mshadow::Tensor<xpu, 2, DType> data, mshadow::Stream<xpu> *s, const OpContext &ctx, std::string flag) {
+    mshadow::Stream<cpu> *s_cpu = ctx.get_stream<cpu>();
+    DType* temp;
+    temp = (DType*) malloc(data.shape_.Size() * sizeof(DType));
+    mshadow::Tensor<cpu, 2, DType> temp_tensor(temp, data.shape_, s_cpu);
+    mshadow::Copy(temp_tensor, data, s);
+    printf("--------------------------- %s ---------------------------\n", flag.c_str());
+    for (int i=0; i< temp_tensor.size(0); i++) {
+     for (int j=0; j< temp_tensor.size(1); j++) {
+        printf("%f ", temp_tensor[i][j]);
+     } 
+     printf("\n");
+    }
+    printf("\n");
+    free(temp);
+}
+
 struct ProposalTargetLidarParam : public dmlc::Parameter<ProposalTargetLidarParam> {
   index_t num_classes;
   index_t batch_images;
@@ -132,7 +182,7 @@ class ProposalTargetLidarOp : public Operator {
     using namespace mshadow::expr;
     CHECK_EQ(in_data.size(), 2);
     CHECK_EQ(out_data.size(), 4);
-    CHECK_GT(req.size(), 4);
+    CHECK_EQ(req.size(), 4);
     CHECK_EQ(req[proposal_target_lidar_enum::kRoiOutput], kWriteTo);
     CHECK_EQ(req[proposal_target_lidar_enum::kLabel], kWriteTo);
     CHECK_EQ(req[proposal_target_lidar_enum::kBboxTarget], kWriteTo);
@@ -205,7 +255,12 @@ class ProposalTargetLidarOp : public Operator {
     bbox_weight[3] = param_.bbox_weight[3];
     bbox_weight[4] = param_.bbox_weight[4];
     bbox_weight[5] = param_.bbox_weight[5];
+
+    const int omp_threads(engine::OpenMP::Get()->GetRecommendedOMPThreadCount());
+    #pragma omp parallel for num_threads(omp_threads)
     for (index_t i = 0; i < num_image; ++i) {
+      if (kept_gtbboxes[i].size() == 0)
+        continue;
       TensorContainer<cpu, 2, DType> kept_rois_i    (Shape2(kept_rois[i].size(),     rois.size(2)));
       TensorContainer<cpu, 2, DType> kept_gtbboxes_i(Shape2(kept_gtbboxes[i].size(), gt_bboxes.size(2)));
       for (index_t j = 0; j < kept_rois_i.size(0); ++j) {
@@ -242,7 +297,9 @@ class ProposalTargetLidarOp : public Operator {
                                              get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 6), s);
     Tensor<xpu, 3, DType> xpu_bbox_weights = out_data[proposal_target_lidar_enum::kBboxWeight].
                                              get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 6), s);
-    
+    // print_shape_3D<xpu, DType>(xpu_bbox_weights, "xpu_bbox_weights");
+
+
     Copy(xpu_output_rois, cpu_output_rois, s);
     Copy(xpu_labels, cpu_labels, s);
     Copy(xpu_bbox_targets, cpu_bbox_targets, s);
@@ -312,7 +369,7 @@ class ProposalTargetLidarProp : public OperatorProperty {
     const TShape &dshape = in_shape->at(proposal_target_lidar_enum::kRois);
     const int image_rois  = param_.image_rois;
 
-    auto output_rois_shape = Shape3(dshape[0], image_rois, 6);
+    auto output_rois_shape = Shape3(dshape[0], image_rois, 4);
     auto label_shape = Shape2(dshape[0], image_rois);
     auto bbox_target_shape = Shape3(dshape[0], image_rois, param_.num_classes * 6);
     auto bbox_weight_shape = Shape3(dshape[0], image_rois, param_.num_classes * 6);

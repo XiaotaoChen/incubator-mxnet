@@ -20,8 +20,32 @@ using std::log;
 namespace mshadow {
 namespace proposal_target_lidar_v1 {
 
+template <typename DType>
+void print_cpu_2D(const Tensor<cpu, 2, DType> data, std::string flag) {
+  printf("--------------------------- %s ---------------------------\n", flag.c_str());
+  for (int i=0; i< data.size(0); i++) {
+    for (int j=0; j< data.size(1); j++) {
+      printf("%f ", data[i][j]);
+    } 
+    printf("\n");
+  }
+  printf("\n");
+}
 
-
+template <typename DType>
+void print_cpu_3D(const Tensor<cpu, 3, DType> data, std::string flag) {
+  printf("--------------------------- %s ---------------------------\n", flag.c_str());
+  for (int i=0; i< data.size(0); i++) {
+    for (int j=0; j< data.size(1); j++) {
+      for (int k=0; k< data.size(2); k++) {
+          printf("%f ", data[i][j][k]);
+       }
+       printf("\n");
+    } 
+    printf("\n");
+  }
+  printf("\n");
+}
 
 template <typename DType>
 inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
@@ -43,6 +67,11 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
   TensorContainer<cpu, 2 , DType> gt_boxes_2point(Shape2(gt_boxes.size(0), 4), 0.f);
   // calculate outer box
   outer_gt_bbox(gt_boxes, gt_boxes_2point);
+  // print_cpu_2D<DType>(gt_boxes, "gt_boxes");
+  // print_cpu_2D<DType>(gt_boxes_2point, "gt_boxes_2point");
+
+  // printf("gt_boxes size:%d\n", gt_boxes.size(0));
+
   TensorContainer<cpu, 2, DType> IOUs(Shape2(all_rois.size(0), gt_boxes.size(0)), 0.f);
 
   BBoxOverlap(all_rois, gt_boxes_2point, IOUs);
@@ -110,10 +139,12 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
   for (index_t i = 0; i < fg_rois_this_image; ++i) {
       kept_indexes.push_back(fg_indexes[i]);
   }
+  // printf("fg indexs size:%d, bg index size:%d\n", fg_indexes.size(), bg_indexes.size());
+  // printf("fg kept_indexes.size():%d\n", kept_indexes.size());
   for (index_t i = 0; i < bg_rois_this_image; ++i) {
       kept_indexes.push_back(bg_indexes[i]);
   }
-
+  // printf("fg+bg kept_indexes.size():%d\n", kept_indexes.size());
   // pad with negative rois, original code is GARBAGE and omitted
   while (kept_indexes.size() < rois_per_image && neg_indexes.size() > 0) {
       index_t gap = rois_per_image - kept_indexes.size();
@@ -122,6 +153,13 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
           kept_indexes.push_back(neg_indexes[idx]);
       }
   }
+  // printf("kept_indexes.size():%d\n", kept_indexes.size());
+  // for (index_t i = 0; i < kept_indexes.size(); i++ ) {
+  //   if (kept_indexes[i] >= all_rois.size(0)) {
+  //     printf("kept_index:%d, rois:%d\n", kept_indexes[i], all_rois.size(0));
+  //     LOG(FATAL) << "kept index must less than rois.size()";
+  //   }
+  // }
   /*
   labels = labels[keep_indexes]
   labels[fg_rois_per_this_image:] = 0
@@ -133,8 +171,6 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
     }
     Copy(rois[i], all_rois[kept_indexes[i]]);
   }
-
-
   TensorContainer<cpu, 2, DType> rois_tmp(Shape2(rois.size(0), 4));
   for (index_t i = 0; i < rois_tmp.size(0); ++i) {
       Copy(rois_tmp[i], rois[i]);
@@ -142,20 +178,28 @@ inline void SampleROI(const Tensor<cpu, 2, DType> &all_rois,
 
   TensorContainer<cpu, 2, DType> gt_bboxes_tmp(Shape2(rois.size(0), 9));
   for (index_t i = 0; i < rois_tmp.size(0); ++i) {
+      // printf("%d, rois_tmp.size(0):%d, kept_indexes[i]:%d\n", i, rois_tmp.size(0), kept_indexes[i]);
       Copy(gt_bboxes_tmp[i], gt_boxes[gt_assignment[kept_indexes[i]]].Slice(0, 9));
   }
   TensorContainer<cpu, 2, DType> targets(Shape2(rois.size(0), 6));
   NonLinearTransformWithAngleAndNormalization(rois_tmp, gt_bboxes_tmp, targets, bbox_mean, bbox_std);
-
   TensorContainer<cpu, 2, DType> bbox_target_data(Shape2(targets.size(0), 7));
   for (index_t i = 0; i < bbox_target_data.size(0); ++i) {
-      if (class_agnostic){
-        //class-agnostic regression class index = {0, 1}
-//        bbox_target_data[i][0] = min(1.f, labels[i]);
-        bbox_target_data[i][0] = labels[i]< static_cast<DType>(1) ? labels[i]:static_cast<DType>(1);
-      }else{
-        bbox_target_data[i][0] = labels[i];
+//       if (class_agnostic){
+//         //class-agnostic regression class index = {0, 1}
+// //        bbox_target_data[i][0] = min(1.f, labels[i]);
+//         bbox_target_data[i][0] = labels[i]< static_cast<DType>(1) ? labels[i]:static_cast<DType>(1);
+//       }else{
+//         bbox_target_data[i][0] = labels[i];
+//       }
+      if (class_agnostic) {
+        if (labels[i] > DType(0.5))
+          labels[i] = DType(1);
+        else
+          labels[i] = DType(0);
       }
+      bbox_target_data[i][0] = labels[i];
+
       Copy(bbox_target_data[i].Slice(1, 7), targets[i]);
   }
 
@@ -263,7 +307,7 @@ void outer_gt_bbox(const Tensor<cpu, 2, DType> &gt_rois, Tensor<cpu, 2, DType> &
     }
     gt_boxes_2point[i][0] = x_min;
     gt_boxes_2point[i][1] = y_min;
-    gt_boxes_2point[i][2] = y_max;
+    gt_boxes_2point[i][2] = x_max;
     gt_boxes_2point[i][3] = y_max;
   }
 }
