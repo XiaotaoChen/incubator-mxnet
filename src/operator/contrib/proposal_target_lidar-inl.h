@@ -15,7 +15,7 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include "./operator_common.h"
+#include "../operator_common.h"
 
 #include <iostream>
 
