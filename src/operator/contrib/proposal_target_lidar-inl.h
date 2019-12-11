@@ -82,57 +82,6 @@ enum ProposalTargetLidarInputs {kRois, kGtBboxes};
 enum ProposalTargetLidarOutputs {kRoiOutput, kLabel, kBboxTarget, kBboxWeight};
 }
 
-template<typename xpu, typename DType>
-void print_shape_3D(mshadow::Tensor<xpu, 3, DType> data, std::string flag) {
-  printf("%s size:%d, size0:%d, size1:%d, size2:%d\n",flag.c_str(), data.shape_.Size(), 
-            data.size(0), data.size(1), data.size(2));
-}
-
-template<typename xpu, typename DType>
-void print_shape_2D(mshadow::Tensor<xpu, 2, DType> data, std::string flag) {
-  printf("%s size:%d, size0:%d, size1:%d\n",flag.c_str(), data.shape_.Size(), 
-            data.size(0), data.size(1));
-}
-
-template <typename xpu, typename DType>
-void print_data_3D(mshadow::Tensor<xpu, 3, DType> data, mshadow::Stream<xpu> *s, const OpContext &ctx, std::string flag) {
-    mshadow::Stream<cpu> *s_cpu = ctx.get_stream<cpu>();
-    DType* temp;
-    temp = (DType*) malloc(data.shape_.Size() * sizeof(DType));
-    mshadow::Tensor<cpu, 3, DType> temp_tensor(temp, data.shape_, s_cpu);
-    mshadow::Copy(temp_tensor, data, s);
-    printf("--------------------------- %s ---------------------------\n", flag.c_str());
-    for (int i=0; i< temp_tensor.size(0); i++) {
-     for (int j=0; j< temp_tensor.size(1); j++) {
-       for (int k=0; k< temp_tensor.size(2); k++) {
-          printf("%f ", temp_tensor[i][j][k]);
-       }
-       printf("\n");
-     } 
-     printf("\n");
-    }
-    printf("\n");
-    free(temp);
-}
-
-template <typename xpu, typename DType>
-void print_data_2D(mshadow::Tensor<xpu, 2, DType> data, mshadow::Stream<xpu> *s, const OpContext &ctx, std::string flag) {
-    mshadow::Stream<cpu> *s_cpu = ctx.get_stream<cpu>();
-    DType* temp;
-    temp = (DType*) malloc(data.shape_.Size() * sizeof(DType));
-    mshadow::Tensor<cpu, 2, DType> temp_tensor(temp, data.shape_, s_cpu);
-    mshadow::Copy(temp_tensor, data, s);
-    printf("--------------------------- %s ---------------------------\n", flag.c_str());
-    for (int i=0; i< temp_tensor.size(0); i++) {
-     for (int j=0; j< temp_tensor.size(1); j++) {
-        printf("%f ", temp_tensor[i][j]);
-     } 
-     printf("\n");
-    }
-    printf("\n");
-    free(temp);
-}
-
 struct ProposalTargetLidarParam : public dmlc::Parameter<ProposalTargetLidarParam> {
   index_t num_classes;
   index_t batch_images;
@@ -297,8 +246,6 @@ class ProposalTargetLidarOp : public Operator {
                                              get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 6), s);
     Tensor<xpu, 3, DType> xpu_bbox_weights = out_data[proposal_target_lidar_enum::kBboxWeight].
                                              get_with_shape<xpu, 3, DType>(Shape3(num_image, image_rois, param_.num_classes * 6), s);
-    // print_shape_3D<xpu, DType>(xpu_bbox_weights, "xpu_bbox_weights");
-
 
     Copy(xpu_output_rois, cpu_output_rois, s);
     Copy(xpu_labels, cpu_labels, s);
@@ -392,7 +339,7 @@ class ProposalTargetLidarProp : public OperatorProperty {
   }
 
   std::string TypeString() const override {
-    return "ProposalTargetLidar";
+    return "_contrib_ProposalTargetLidar";
   }
 
   OperatorProperty *Copy() const override {
