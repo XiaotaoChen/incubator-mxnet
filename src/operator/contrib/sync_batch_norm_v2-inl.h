@@ -276,27 +276,25 @@ class Globalcomm {
 private:
     int ndev;
     ncclUniqueId uid;
-    ncclComm_t* comms;
-    cudaStream_t* streams;
+    std::vector<ncclComm_t> comms;
+    std::vector<cudaStream_t> streams;
     std::vector<bool> inited;
     // mutexs for threads on per device
     std::mutex* mutexs;
 
 public:
     Globalcomm(int ndev): ndev(ndev) {
-            ncclGetUniqueId(&uid);
-            inited = std::vector<bool>(ndev, false);
-            comms = new ncclComm_t[ndev];
-            streams = new cudaStream_t[ndev];
-            mutexs = new std::mutex[ndev];
+        ncclGetUniqueId(&uid);
+        inited = std::vector<bool>(ndev, false);
+        comms = std::vector<ncclComm_t>(ndev);
+        streams = std::vector<cudaStream_t>(ndev);
+        mutexs = new std::mutex[ndev];
     }
 
     ~Globalcomm() {
         for(int i=0; i < ndev; i++) {
             if (inited[i]) ncclCommDestroy(comms[i]);
         }
-        delete[] comms;
-        delete[] streams;
         // it seems like this would cause double
         // delete[] mutexs;
     }
@@ -329,6 +327,55 @@ public:
 };
 
 
+class Tensorcomm {
+private:
+    int ndev;
+    ncclUniqueId uid;
+    std::vector<ncclComm_t> comms;
+    std::vector<cudaStream_t> streams;
+    std::vector<bool> inited;
+
+public:
+    Tensorcomm(int ndev): ndev(ndev) {
+        ncclGetUniqueId(&uid);
+        inited = std::vector<bool>(ndev, false);
+        comms = std::vector<ncclComm_t>(ndev);
+        streams = std::vector<cudaStream_t>(ndev);
+    }
+    
+
+    ~Tensorcomm() {
+        for(int i=0; i < ndev; i++) {
+            if (inited[i]) ncclCommDestroy(comms[i]);
+        }
+    }
+
+    int get_device_id() {
+        int device_id;
+        CUDACHECK(cudaGetDevice(&device_id));
+        return device_id;
+    }
+
+    void init() {
+        int device_id = get_device_id();
+        if (!inited[device_id]) {
+            std::cout << "global comm init: " << device_id << std::endl;
+            CUDACHECK(cudaSetDevice(device_id));
+            CUDACHECK(cudaStreamCreate(&streams[device_id]));
+            NCCLCHECK(ncclCommInitRank(&comms[device_id], ndev, uid, device_id));
+            inited[device_id] = true;
+        }
+    }
+
+    void reduce(float* buff, int size) {
+        int device_id = get_device_id();
+        NCCLCHECK(ncclAllReduce((const void*)buff, (void*)buff, size, ncclFloat, ncclSum, comms[device_id], streams[device_id]));
+        CUDACHECK(cudaStreamSynchronize(streams[device_id]));
+    }
+
+};
+
+
 // Global variables for Synchronizations
 // static GlobalSharedRank<int> global_shared_rank;
 static GlobalShared<Barrier> global_shared_barrier;
@@ -336,6 +383,15 @@ static GlobalShared<Barrier> global_shared_barrier;
 // static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_var;
 // static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_grad;
 // static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_prod;
+
+
+static GlobalShared<Tensorcomm> global_shared_mean_comms;
+static GlobalShared<Tensorcomm> global_shared_var_comms;
+static GlobalShared<Tensorcomm> global_shared_grad_comms;
+static GlobalShared<Tensorcomm> global_shared_prod_comms;
+
+// static GlobalShared<Globalcomm> global_forward_comms;
+// static GlobalShared<Globalcomm> global_backward_comms;
 
 template<typename xpu>
 class SyncBatchNormV2 : public Operator {
@@ -417,8 +473,18 @@ class SyncBatchNormV2 : public Operator {
       if (ctx.is_train && !param_.use_global_stats) {
         
         // get my rank
-        static Globalcomm gc = singleton<Globalcomm>::getInstance(param_.ndev);
-        gc.init();
+        // static Globalcomm gc = singleton<Globalcomm>::getInstance(param_.ndev);
+        // gc.init();
+
+        Tensorcomm* mean_comm = global_shared_mean_comms.Register(param_.key + "f", param_.ndev);
+        mean_comm->init();
+        Tensorcomm* var_comm = global_shared_var_comms.Register(param_.key + "f", param_.ndev);
+        var_comm->init();
+
+        // Globalcomm* forward_comm = global_forward_comms.Register("forward", param_.ndev);
+        // forward_comm->init();
+
+
         Barrier *global_barrier = global_shared_barrier.Register(param_.key + "f", param_.ndev);
         // int myRank = global_shared_rank.Register(param_.key + "f", param_.ndev);
 
@@ -449,8 +515,15 @@ class SyncBatchNormV2 : public Operator {
         // Copy(var, var_cpu, s);
 
         global_barrier->Wait();
-        gc.reduce(mean.dptr_, mean.shape_.Size());
-        gc.reduce(var.dptr_, var.shape_.Size());
+        // gc.reduce(mean.dptr_, mean.shape_.Size());
+        // gc.reduce(var.dptr_, var.shape_.Size());
+
+        mean_comm->reduce(mean.dptr_, mean.shape_.Size());
+        var_comm->reduce(var.dptr_, var.shape_.Size());
+
+        // forward_comm->reduce(mean.dptr_, mean.shape_.Size());
+        // forward_comm->reduce(var.dptr_, var.shape_.Size());
+
         mean = (1.f/param_.ndev) * mean;
         var = (1.f/param_.ndev) * var;
 
@@ -567,8 +640,18 @@ class SyncBatchNormV2 : public Operator {
       if (ctx.is_train && !param_.use_global_stats) {
 
         // get my rank
-        static Globalcomm gc = singleton<Globalcomm>::getInstance(param_.ndev);
-        gc.init();
+        // static Globalcomm gc = singleton<Globalcomm>::getInstance(param_.ndev);
+        // gc.init();
+
+        Tensorcomm* grad_comm = global_shared_grad_comms.Register(param_.key + "f", param_.ndev);
+        grad_comm->init();
+        Tensorcomm* prod_comm = global_shared_prod_comms.Register(param_.key + "f", param_.ndev);
+        prod_comm->init();
+
+        // Globalcomm* backward_comm = global_backward_comms.Register("forward", param_.ndev);
+        // backward_comm->init();
+
+
         Barrier *global_barrier = global_shared_barrier.Register(param_.key + "b", param_.ndev);
         // int myRank = global_shared_rank.Register(param_.key + "b", param_.ndev);
 
@@ -602,8 +685,15 @@ class SyncBatchNormV2 : public Operator {
         // Copy(sumProd, prod_cpu, s);
 
         global_barrier->Wait();
-        gc.reduce(sumGrad.dptr_, sumGrad.shape_.Size());
-        gc.reduce(sumProd.dptr_, sumProd.shape_.Size());
+        // gc.reduce(sumGrad.dptr_, sumGrad.shape_.Size());
+        // gc.reduce(sumProd.dptr_, sumProd.shape_.Size());
+
+        grad_comm->reduce(sumGrad.dptr_, sumGrad.shape_.Size());
+        prod_comm->reduce(sumProd.dptr_, sumProd.shape_.Size());
+
+        // backward_comm->reduce(sumGrad.dptr_, sumGrad.shape_.Size());
+        // backward_comm->reduce(sumProd.dptr_, sumProd.shape_.Size());
+
         sumGrad = (1.f/param_.ndev) * sumGrad;
         sumProd = (1.f/param_.ndev) * sumProd;
 
