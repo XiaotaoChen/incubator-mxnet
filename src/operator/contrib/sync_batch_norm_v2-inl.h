@@ -193,32 +193,6 @@ class GlobalShared {
   std::map<std::string, T*> registry_;
 };
 
-template<class T>
-class GlobalSharedRank {
- public:
-  T Register(const std::string &key, int ndev) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = registry_.find(key);
-    if (it != registry_.end()) {
-      T* tmpT = it->second;
-      *tmpT = (*tmpT == ndev - 1) ? 0 : *tmpT + 1;
-      return *tmpT;
-    }
-    T *newT = new T(0);
-    registry_[key] = newT;
-    return *newT;
-  }
-  ~GlobalSharedRank() {
-    for (auto it = registry_.begin(); it != registry_.end(); it++) {
-      T *ptr = it->second;
-      delete ptr;
-    }
-  }
- private:
-  std::mutex mutex_;
-  std::map<std::string, T*> registry_;
-};
-
 class Barrier {
  private:
   std::mutex mutex_;
@@ -326,7 +300,6 @@ public:
 
 };
 
-
 class Tensorcomm {
 private:
     int ndev;
@@ -334,9 +307,10 @@ private:
     std::vector<ncclComm_t> comms;
     std::vector<cudaStream_t> streams;
     std::vector<bool> inited;
+    std::string key;
 
 public:
-    Tensorcomm(int ndev): ndev(ndev) {
+    Tensorcomm(int ndev, std::string key): ndev(ndev), key(key) {
         ncclGetUniqueId(&uid);
         inited = std::vector<bool>(ndev, false);
         comms = std::vector<ncclComm_t>(ndev);
@@ -359,7 +333,7 @@ public:
     void init() {
         int device_id = get_device_id();
         if (!inited[device_id]) {
-            std::cout << "global comm init: " << device_id << std::endl;
+            std::cout << "tensor comm init key: " << key<< " device id: " << device_id << std::endl;
             CUDACHECK(cudaSetDevice(device_id));
             CUDACHECK(cudaStreamCreate(&streams[device_id]));
             NCCLCHECK(ncclCommInitRank(&comms[device_id], ndev, uid, device_id));
@@ -376,22 +350,35 @@ public:
 };
 
 
+template<class T>
+class GlobalSharedwithKey {
+ public:
+  T* Register(const std::string &key, int ndev) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = registry_.find(key);
+    if (it != registry_.end()) return it->second;
+    T *newT = new T(ndev,key);
+    registry_[key] = newT;
+    return newT;
+  }
+  ~GlobalSharedwithKey() {
+    for (auto it = registry_.begin(); it != registry_.end(); it++) {
+      T *ptr = it->second;
+      delete ptr;
+    }
+  }
+ private:
+  std::mutex mutex_;
+  std::map<std::string, T*> registry_;
+};
+
 // Global variables for Synchronizations
-// static GlobalSharedRank<int> global_shared_rank;
 static GlobalShared<Barrier> global_shared_barrier;
-// static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_mean;
-// static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_var;
-// static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_grad;
-// static GlobalShared<SharedND<mshadow::Tensor<cpu, 1, real_t>>> global_shared_prod;
 
-
-static GlobalShared<Tensorcomm> global_shared_mean_comms;
-static GlobalShared<Tensorcomm> global_shared_var_comms;
-static GlobalShared<Tensorcomm> global_shared_grad_comms;
-static GlobalShared<Tensorcomm> global_shared_prod_comms;
-
-// static GlobalShared<Globalcomm> global_forward_comms;
-// static GlobalShared<Globalcomm> global_backward_comms;
+static GlobalSharedwithKey<Tensorcomm> global_shared_mean_comms;
+static GlobalSharedwithKey<Tensorcomm> global_shared_var_comms;
+static GlobalSharedwithKey<Tensorcomm> global_shared_grad_comms;
+static GlobalSharedwithKey<Tensorcomm> global_shared_prod_comms;
 
 template<typename xpu>
 class SyncBatchNormV2 : public Operator {
@@ -471,22 +458,15 @@ class SyncBatchNormV2 : public Operator {
   
       // whether use global statistics
       if (ctx.is_train && !param_.use_global_stats) {
-        
-        // get my rank
         // static Globalcomm gc = singleton<Globalcomm>::getInstance(param_.ndev);
         // gc.init();
 
-        Tensorcomm* mean_comm = global_shared_mean_comms.Register(param_.key + "f", param_.ndev);
+        Tensorcomm* mean_comm = global_shared_mean_comms.Register(param_.key + "_mean", param_.ndev);
         mean_comm->init();
-        Tensorcomm* var_comm = global_shared_var_comms.Register(param_.key + "f", param_.ndev);
+        Tensorcomm* var_comm = global_shared_var_comms.Register(param_.key + "_var", param_.ndev);
         var_comm->init();
 
-        // Globalcomm* forward_comm = global_forward_comms.Register("forward", param_.ndev);
-        // forward_comm->init();
-
-
         Barrier *global_barrier = global_shared_barrier.Register(param_.key + "f", param_.ndev);
-        // int myRank = global_shared_rank.Register(param_.key + "f", param_.ndev);
 
         // get the mean and var
         Tensor<xpu, 1> mean = out_data[syncbatchnormV2::kMean].get<xpu, 1, real_t>(s);
@@ -496,23 +476,6 @@ class SyncBatchNormV2 : public Operator {
         // E(x) and E(x^2)
         mean = scale * sumall_except_dim<1>(data);
         var = scale * sumall_except_dim<1>(F<mshadow_op::square>(data));
-        // SharedND<Tensor<cpu, 1, real_t>> *sharedMean =
-        //   global_shared_mean.Register(param_.key, param_.ndev);
-        // SharedND<Tensor<cpu, 1, real_t>> *sharedVar =
-        //   global_shared_var.Register(param_.key, param_.ndev);
-        // // copy to cpu, push and pull
-        // Tensor<cpu, 1, real_t>* mean_cpu_ptr = sharedMean->Retrieve(mean.shape_, myRank);
-        // Tensor<cpu, 1, real_t>* var_cpu_ptr = sharedVar->Retrieve(mean.shape_, myRank);
-        // Copy(*mean_cpu_ptr, mean, s);
-        // Copy(*var_cpu_ptr, var, s);
-        // sharedMean->SetReady(myRank);
-        // sharedVar->SetReady(myRank);
-        // global_barrier->Wait();
-        // Tensor<cpu, 1, real_t> mean_cpu = sharedMean->Pop(myRank);
-        // Tensor<cpu, 1, real_t> var_cpu = sharedVar->Pop(myRank);
-        // // copy back to gpu
-        // Copy(mean, mean_cpu, s);
-        // Copy(var, var_cpu, s);
 
         global_barrier->Wait();
         // gc.reduce(mean.dptr_, mean.shape_.Size());
@@ -520,9 +483,6 @@ class SyncBatchNormV2 : public Operator {
 
         mean_comm->reduce(mean.dptr_, mean.shape_.Size());
         var_comm->reduce(var.dptr_, var.shape_.Size());
-
-        // forward_comm->reduce(mean.dptr_, mean.shape_.Size());
-        // forward_comm->reduce(var.dptr_, var.shape_.Size());
 
         mean = (1.f/param_.ndev) * mean;
         var = (1.f/param_.ndev) * var;
@@ -638,22 +598,16 @@ class SyncBatchNormV2 : public Operator {
       if (param_.fix_gamma) slope = 1.f;
 
       if (ctx.is_train && !param_.use_global_stats) {
-
-        // get my rank
         // static Globalcomm gc = singleton<Globalcomm>::getInstance(param_.ndev);
         // gc.init();
 
-        Tensorcomm* grad_comm = global_shared_grad_comms.Register(param_.key + "f", param_.ndev);
+        Tensorcomm* grad_comm = global_shared_grad_comms.Register(param_.key + "_grad", param_.ndev);
         grad_comm->init();
-        Tensorcomm* prod_comm = global_shared_prod_comms.Register(param_.key + "f", param_.ndev);
+        Tensorcomm* prod_comm = global_shared_prod_comms.Register(param_.key + "_prod", param_.ndev);
         prod_comm->init();
-
-        // Globalcomm* backward_comm = global_backward_comms.Register("forward", param_.ndev);
-        // backward_comm->init();
 
 
         Barrier *global_barrier = global_shared_barrier.Register(param_.key + "b", param_.ndev);
-        // int myRank = global_shared_rank.Register(param_.key + "b", param_.ndev);
 
         Shape<1> dshape = Shape1(mean.shape_[0]);
         Tensor<xpu, 1> gmean = Tensor<xpu, 1>(workspace.dptr_, dshape, s);
@@ -666,23 +620,6 @@ class SyncBatchNormV2 : public Operator {
         Tensor<xpu, 1> sumProd = Tensor<xpu, 1>(workspace.dptr_ + 3 * mean.shape_[0], dshape, s);
         sumGrad = sumall_except_dim<1>(grad);
         sumProd = sumall_except_dim<1>(grad * (data - broadcast<1>(mean, data.shape_)));
-        // SharedND<Tensor<cpu, 1, real_t>> *sharedGrad =
-        //   global_shared_grad.Register(param_.key, param_.ndev);
-        // SharedND<Tensor<cpu, 1, real_t>> *sharedProd =
-        //   global_shared_prod.Register(param_.key, param_.ndev);
-        // // copy to cpu, push and pull
-        // Tensor<cpu, 1, real_t>* grad_cpu_ptr = sharedGrad->Retrieve(sumGrad.shape_, myRank);
-        // Tensor<cpu, 1, real_t>* prod_cpu_ptr = sharedProd->Retrieve(sumProd.shape_, myRank);
-        // Copy(*grad_cpu_ptr, sumGrad, s);
-        // Copy(*prod_cpu_ptr, sumProd, s);
-        // sharedGrad->SetReady(myRank);
-        // sharedProd->SetReady(myRank);
-        // global_barrier->Wait();
-        // Tensor<cpu, 1, real_t> grad_cpu = sharedGrad->Pop(myRank);
-        // Tensor<cpu, 1, real_t> prod_cpu = sharedProd->Pop(myRank);
-        // // copy back to gpu
-        // Copy(sumGrad, grad_cpu, s);
-        // Copy(sumProd, prod_cpu, s);
 
         global_barrier->Wait();
         // gc.reduce(sumGrad.dptr_, sumGrad.shape_.Size());
@@ -690,9 +627,6 @@ class SyncBatchNormV2 : public Operator {
 
         grad_comm->reduce(sumGrad.dptr_, sumGrad.shape_.Size());
         prod_comm->reduce(sumProd.dptr_, sumProd.shape_.Size());
-
-        // backward_comm->reduce(sumGrad.dptr_, sumGrad.shape_.Size());
-        // backward_comm->reduce(sumProd.dptr_, sumProd.shape_.Size());
 
         sumGrad = (1.f/param_.ndev) * sumGrad;
         sumProd = (1.f/param_.ndev) * sumProd;
