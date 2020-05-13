@@ -182,6 +182,7 @@ public:
     }
     
     ~Globalcomm() {
+        std::cout << "************** global comm to destory ****************************\n";
         for(int i=0; i < ndev; i++) {
             if (inited[i]) ncclCommDestroy(comms[i]);
         }
@@ -230,7 +231,9 @@ public:
             // }
             cv.wait(tb_lck, [this, &key]{ return (!sq.empty()) && sq.front() == key;});
         }
-        // std::cout << key << ":" << device_id << " to do reduce\n";
+        if (device_id == 0) {
+          std::cout << key << ":" << device_id << " to do reduce\n";
+        }
         NCCLCHECK(ncclAllReduce((const void*)buff, (void*)buff, size, ncclFloat, ncclSum, comms[device_id], streams[device_id]));
         CUDACHECK(cudaStreamSynchronize(streams[device_id]));
         if (sq.front() == key) {
