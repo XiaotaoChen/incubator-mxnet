@@ -205,6 +205,16 @@ class CondBatchNormV1Op : public Operator {
     auto gamma_req = OpReqType::kWriteTo;
     auto beta_req = OpReqType::kWriteTo;
 
+    // assign 0.0f gradients to both branch
+    Tensor<xpu, 1> init_then_gslope = in_grad[cond_batchnorm_v1::kThenGamma].get<xpu, 1, real_t>(s);
+    Tensor<xpu, 1> init_then_gbias = in_grad[cond_batchnorm_v1::kThenBeta].get<xpu, 1, real_t>(s);
+    Tensor<xpu, 1> init_else_gslope = in_grad[cond_batchnorm_v1::kElseGamma].get<xpu, 1, real_t>(s);
+    Tensor<xpu, 1> init_else_gbias = in_grad[cond_batchnorm_v1::kElseBeta].get<xpu, 1, real_t>(s);
+    Assign(init_then_gslope, req[cond_batchnorm_v1::kThenGamma], 0.0f);
+    Assign(init_then_gbias, req[cond_batchnorm_v1::kThenBeta], 0.0f);
+    Assign(init_else_gslope, req[cond_batchnorm_v1::kElseGamma], 0.0f);
+    Assign(init_else_gbias, req[cond_batchnorm_v1::kElseBeta], 0.0f);
+
     if (cpu_condition[0] > 0.5) {
       slope = in_data[cond_batchnorm_v1::kThenGamma].get<xpu, 1, real_t>(s);
       gslope = in_grad[cond_batchnorm_v1::kThenGamma].get<xpu, 1, real_t>(s);
@@ -228,12 +238,6 @@ class CondBatchNormV1Op : public Operator {
         gbias = in_grad[cond_batchnorm_v1::kElseBeta].get<xpu, 1, real_t>(s);
         gamma_req = req[cond_batchnorm_v1::kElseGamma];
         beta_req = req[cond_batchnorm_v1::kElseBeta];
-        
-        // assign 0.0f gradients to unruned branch
-        Tensor<xpu, 1> unruned_gslope = in_grad[cond_batchnorm_v1::kThenGamma].get<xpu, 1, real_t>(s);
-        Tensor<xpu, 1> unruned_gbias = in_grad[cond_batchnorm_v1::kThenBeta].get<xpu, 1, real_t>(s);
-        Assign(unruned_gslope, req[cond_batchnorm_v1::kThenGamma], 0.0f);
-        Assign(unruned_gbias, req[cond_batchnorm_v1::kThenBeta], 0.0f);
       }
       moving_mean = aux_states[cond_batchnorm_v1::kElseMovingMean].get<xpu, 1, real_t>(s);
       moving_var = aux_states[cond_batchnorm_v1::kElseMovingVar].get<xpu, 1, real_t>(s);
